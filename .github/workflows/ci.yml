@@ -1,0 +1,59 @@
+name: CI
+
+# This repository's default branch is master. If it is ever renamed, change it here too: a workflow
+# whose branch filter matches nothing does not fail, it simply never runs, and the first sign is a
+# release built from code nothing ever tested.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          # Both, because the runtime library multi-targets net8.0 alongside net10.0.
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore Raptor21.EF.Extensions.slnx
+
+      - name: Build
+        run: dotnet build Raptor21.EF.Extensions.slnx -c Release --no-restore
+
+      - name: Test
+        run: dotnet test Raptor21.EF.Extensions.slnx -c Release --no-build --verbosity normal
+
+      - name: Pack
+        run: dotnet pack Raptor21.EF.Extensions.slnx -c Release --no-build -o artifacts
+
+      # The generator is packed as loose content under analyzers/dotnet/cs. Content is exactly the kind
+      # of thing that goes missing without breaking the build: the package still installs, still
+      # compiles, and every [StoredProcedure] method just never gets a body. Open the package and look.
+      - name: Verify the generator is inside the package
+        run: |
+          set -euo pipefail
+          pkg=$(ls artifacts/Raptor21.EF.Extensions.StoredProcedures.*.nupkg | grep -v symbols | head -1)
+          echo "Inspecting $pkg"
+          if ! unzip -l "$pkg" | grep -q 'analyzers/dotnet/cs/.*\.dll'; then
+            echo "::error::$pkg contains no analyzers/dotnet/cs/*.dll - the source generator was not packed."
+            unzip -l "$pkg"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: artifacts/*
+          if-no-files-found: error

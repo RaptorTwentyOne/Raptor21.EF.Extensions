@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Raptor21.EF.Extensions.Migrations</RootNamespace>
+    <AssemblyName>Raptor21.EF.Extensions.Migrations</AssemblyName>
+    <!-- EF1001: subclassing MigrationsModelDiffer means forwarding internal-flagged constructor
+         dependencies. That coupling is exactly why this package tracks one EF major version instead
+         of multi-targeting: an internal signature change between majors is a compile break, not a
+         runtime surprise, and one TFM per EF major keeps it that way. -->
+    <NoWarn>$(NoWarn);EF1001</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <IsPackable>true</IsPackable>
+    <PackageId>Raptor21.EF.Extensions.Migrations</PackageId>
+    <Description>Folds code-first database objects into EF Core migrations: registers scripts as model annotations and emits CREATE OR ALTER / DROP operations through a custom IMigrationsModelDiffer, so procedure changes travel in the same migration as table changes. Targets EF Core 10.</Description>
+    <PackageTags>efcore;migrations;sqlserver;stored-procedure;code-first;schema</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.9" />
+  </ItemGroup>
+
+</Project>

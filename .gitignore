@@ -1,0 +1,33 @@
+# Build output
+bin/
+obj/
+artifacts/
+*.user
+*.suo
+
+# Local database connection settings. The sample reads SAMPLE_SQL_CONNECTION from the environment for
+# exactly this reason - a connection string is a credential, and this repository is public.
+appsettings.Local.json
+secrets.json
+*.local.json
+
+# NuGet
+*.nupkg
+*.snupkg
+
+# IDE
+.vs/
+.idea/
+.vscode/
+*.DotSettings.user
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Working documents, never published. The audit/roadmap under docs/ and the agent instructions are
+# internal notes; the user-facing wiki and usage guide get written separately once the API is frozen.
+/docs/
+CLAUDE.md
+CLAUDE.local.md
+.claude/

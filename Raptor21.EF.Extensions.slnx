@@ -1,0 +1,23 @@
+<Solution>
+  <Folder Name="/solution items/">
+    <File Path="README.md" />
+    <File Path="LICENSE" />
+    <File Path="CHANGELOG.md" />
+    <File Path="CONTRIBUTING.md" />
+    <File Path="Directory.Build.props" />
+    <File Path=".github/workflows/ci.yml" />
+    <File Path=".github/workflows/release.yml" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Raptor21.EF.Extensions.StoredProcedures/Raptor21.EF.Extensions.StoredProcedures.csproj" />
+    <Project Path="src/Raptor21.EF.Extensions.StoredProcedures.Generator/Raptor21.EF.Extensions.StoredProcedures.Generator.csproj" />
+    <Project Path="src/Raptor21.EF.Extensions.Migrations/Raptor21.EF.Extensions.Migrations.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Raptor21.EF.Extensions.StoredProcedures.Generator.Tests/Raptor21.EF.Extensions.StoredProcedures.Generator.Tests.csproj" />
+    <Project Path="tests/Raptor21.EF.Extensions.Migrations.Tests/Raptor21.EF.Extensions.Migrations.Tests.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/Raptor21.EF.Extensions.Sample/Raptor21.EF.Extensions.Sample.csproj" />
+  </Folder>
+</Solution>

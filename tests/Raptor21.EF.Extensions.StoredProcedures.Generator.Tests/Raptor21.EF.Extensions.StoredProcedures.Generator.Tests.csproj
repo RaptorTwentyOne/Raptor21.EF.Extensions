@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Raptor21.EF.Extensions.StoredProcedures.Generator.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Referenced as libraries, NOT analyzers: these tests construct the generator themselves, drive it
+         through CSharpGeneratorDriver and compile its output against the runtime assembly. -->
+    <ProjectReference Include="..\..\src\Raptor21.EF.Extensions.StoredProcedures\Raptor21.EF.Extensions.StoredProcedures.csproj" />
+    <ProjectReference Include="..\..\src\Raptor21.EF.Extensions.StoredProcedures.Generator\Raptor21.EF.Extensions.StoredProcedures.Generator.csproj" />
+  </ItemGroup>
+
+</Project>

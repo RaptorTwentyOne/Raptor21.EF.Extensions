@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Raptor21.EF.Extensions.StoredProcedures</RootNamespace>
+    <AssemblyName>Raptor21.EF.Extensions.StoredProcedures</AssemblyName>
+    <!-- The point of the contract + source-generator design: nothing here is discovered by reflection,
+         so a consumer can publish AOT. These analyzers are what keep that claim honest. -->
+    <IsTrimmable>true</IsTrimmable>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <IsPackable>true</IsPackable>
+    <PackageId>Raptor21.EF.Extensions.StoredProcedures</PackageId>
+    <Description>Code-first, type-safe stored procedure management for SQL Server. Declare a partial method and the generator writes the contract, the typed call, the parameter binding and an assembly-wide registry — no runtime reflection, AOT-friendly. The Roslyn generator ships inside this package.</Description>
+    <PackageTags>sqlserver;stored-procedure;source-generator;code-first;ado.net;aot;efcore</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
+  </ItemGroup>
+
+  <!-- The generator ships INSIDE this package as an analyzer, so one PackageReference gives a consumer
+       both halves and no one can end up with a runtime and a generator of different versions.
+       ReferenceOutputAssembly=false keeps it off this assembly's reference list, and leaving
+       OutputItemType unset means it is built but not run against this project - the runtime library
+       has no [StoredProcedure] methods of its own and does not want the attributes injected into it. -->
+  <PropertyGroup>
+    <_GeneratorDll>$(MSBuildThisFileDirectory)..\Raptor21.EF.Extensions.StoredProcedures.Generator\bin\$(Configuration)\netstandard2.0\Raptor21.EF.Extensions.StoredProcedures.Generator.dll</_GeneratorDll>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Raptor21.EF.Extensions.StoredProcedures.Generator\Raptor21.EF.Extensions.StoredProcedures.Generator.csproj"
+                      ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <None Include="$(_GeneratorDll)" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+  </ItemGroup>
+
+  <!-- A package that quietly lost its generator still installs and still compiles - right up until the
+       consumer's first [StoredProcedure] method, which then simply never gets a body. Fail the pack. -->
+  <Target Name="EnsureGeneratorIsPacked" BeforeTargets="GenerateNuspec">
+    <Error Condition="!Exists('$(_GeneratorDll)')"
+           Text="Source generator not found at $(_GeneratorDll). A package without analyzers/dotnet/cs is useless; build the Generator project in this configuration before packing." />
+  </Target>
+
+</Project>
