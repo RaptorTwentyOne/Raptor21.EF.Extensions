@@ -22,4 +22,14 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.9" />
   </ItemGroup>
 
+  <!-- The runtime package, for one type: SqlBatch. Both halves have to read GO identically, and they did
+       not - this side rejected any script with a matching line while the applier had learned that a GO
+       inside a literal or a block comment is content. A script one half accepts and the other refuses
+       fails at deployment on a file that built cleanly, so the rule lives in one place and this project
+       calls it. The dependency direction is the honest one: the EF integration sits on top of the
+       EF-free runtime, never the reverse. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Raptor21.EF.Extensions.StoredProcedures\Raptor21.EF.Extensions.StoredProcedures.csproj" />
+  </ItemGroup>
+
 </Project>

@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Raptor21.EF.Extensions.StoredProcedures.Scripts;
 
 namespace Raptor21.EF.Extensions.Migrations;
 
@@ -12,9 +13,6 @@ public static partial class StoredProcedureScript
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex CreateOrAlterRegex();
 
-    [GeneratedRegex(@"^\s*GO\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.CultureInvariant)]
-    private static partial Regex GoBatchRegex();
-
     /// <summary>
     /// Validates the script (must be a single <c>CREATE OR ALTER PROCEDURE</c> batch with no GO separators)
     /// and returns its qualified name in canonical <c>schema.name</c> form (defaults schema to <c>dbo</c>).
@@ -25,7 +23,10 @@ public static partial class StoredProcedureScript
         if (string.IsNullOrWhiteSpace(sql))
             throw new InvalidOperationException($"Stored procedure script '{scriptName}' is empty.");
 
-        if (GoBatchRegex().IsMatch(sql))
+        // SqlBatch is the single reader of GO in this library. A regex over the whole text used to
+        // stand here, and it saw a GO inside a string literal or a block comment as a separator,
+        // rejecting scripts the runtime applier splits correctly.
+        if (SqlBatch.ContainsSeparator(sql))
             throw new InvalidOperationException(
                 $"Stored procedure script '{scriptName}' contains a 'GO' batch separator. Each procedure must be a single CREATE OR ALTER PROCEDURE batch (no GO).");
 

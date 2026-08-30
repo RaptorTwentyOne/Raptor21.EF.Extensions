@@ -41,7 +41,14 @@ public static class StoredProcedureSchemaManager
         bool useTransaction = true,
         CancellationToken ct = default)
     {
+        // The applier and the validator guard these arguments too, but under their own parameter names: a
+        // null assembly is reported as "assembly", which appears nowhere in the signature the caller wrote
+        // against. The contracts guard stays first because it is the one argument the delegates would not
+        // reject until the scripts had already been applied to a live database.
         ArgumentNullException.ThrowIfNull(contracts);
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        ArgumentNullException.ThrowIfNull(assemblyWithScripts);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourcePrefix);
 
         await EmbeddedScriptApplier.ApplyEmbeddedScriptsAsync(connectionString, assemblyWithScripts, resourcePrefix, useTransaction, ct).ConfigureAwait(false);
         await StoredProcedureValidator.ValidateAsync(connectionString, contracts, ct).ConfigureAwait(false);

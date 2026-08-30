@@ -122,22 +122,43 @@ public static class StoredProcedureValidator
         }
     }
 
-    private static void CompareSqlType(string paramName, SqlTypeSpec contract, string dbTypeName, int dbMaxLen, byte dbPrec, byte dbScale, string fullName)
+    internal static void CompareSqlType(string paramName, SqlTypeSpec contract, string dbTypeName, int dbMaxLen, byte dbPrec, byte dbScale, string fullName)
     {
+        // A default SqlTypeSpec carries a null name. Dereferencing it would surface as a bare
+        // NullReferenceException naming neither the procedure nor the parameter that caused it, which is
+        // the one thing every other message in this method is careful to say.
+        if (string.IsNullOrWhiteSpace(contract.SqlTypeName))
+            throw new InvalidOperationException($"{fullName}: Parameter {paramName} contract carries no SQL type name.");
+
         var ct = contract.SqlTypeName.Trim();
         var db = dbTypeName.Trim();
         if (!string.Equals(ct, db, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException($"{fullName}: Parameter {paramName} type mismatch. Expected {ct}, found {db}.");
 
-        if (contract.MaxLength.HasValue && contract.MaxLength.Value != dbMaxLen)
-            throw new InvalidOperationException($"{fullName}: Parameter {paramName} max_length mismatch. Expected {contract.MaxLength}, found {dbMaxLen}.");
+        if (contract.MaxLength.HasValue)
+        {
+            // MaxLength is a character count everywhere else in the library (ApplySqlType hands the same
+            // field to SqlParameter.Size, which counts characters), but sys.parameters.max_length is a byte
+            // count, so a correctly declared nvarchar(32) is reported as 64. Only -1 escapes the conversion:
+            // it is the catalog's marker for MAX rather than a length, and a contract spells MAX the same way.
+            var dbMaxLenInChars = dbMaxLen > 0 && IsUnicodeCharacterType(db) ? dbMaxLen / 2 : dbMaxLen;
+            if (contract.MaxLength.Value != dbMaxLenInChars)
+                throw new InvalidOperationException($"{fullName}: Parameter {paramName} max_length mismatch. Expected {contract.MaxLength}, found {dbMaxLenInChars}.");
+        }
+
         if (contract.Precision.HasValue && contract.Precision.Value != dbPrec)
             throw new InvalidOperationException($"{fullName}: Parameter {paramName} precision mismatch. Expected {contract.Precision}, found {dbPrec}.");
         if (contract.Scale.HasValue && contract.Scale.Value != dbScale)
             throw new InvalidOperationException($"{fullName}: Parameter {paramName} scale mismatch. Expected {contract.Scale}, found {dbScale}.");
     }
 
-    private static void ValidateSqlToDotNetType(string fullName, string columnName, string systemTypeName, bool isNullable, Type dotNetType)
+    // The two catalog types that store two bytes per character. TYPE_NAME reports the declared type, so a
+    // Unicode parameter arrives under exactly one of these spellings and never with a length suffix.
+    private static bool IsUnicodeCharacterType(string dbTypeName) =>
+        string.Equals(dbTypeName, "nvarchar", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(dbTypeName, "nchar", StringComparison.OrdinalIgnoreCase);
+
+    internal static void ValidateSqlToDotNetType(string fullName, string columnName, string systemTypeName, bool isNullable, Type dotNetType)
     {
         var sqlType = systemTypeName.Split('(')[0].Trim().ToLowerInvariant();
         // Nullability is only enforceable for value types: reflection cannot distinguish a reference type's
@@ -149,25 +170,31 @@ public static class StoredProcedureValidator
         {
             var expectedNullable = IsNullableType(dotNetType);
             if (isNullable && !expectedNullable)
-                throw new InvalidOperationException($"{fullName}: Result column {columnName} is NULL in SQL but contract type {dotNetType.Name} is non-nullable.");
+                throw new InvalidOperationException($"{fullName}: Result column {columnName} is NULL in SQL but contract type {DescribeDotNetType(dotNetType)} is non-nullable.");
             if (!isNullable && expectedNullable)
-                throw new InvalidOperationException($"{fullName}: Result column {columnName} is NOT NULL in SQL but contract type {dotNetType.Name} is nullable.");
+                throw new InvalidOperationException($"{fullName}: Result column {columnName} is NOT NULL in SQL but contract type {DescribeDotNetType(dotNetType)} is nullable.");
         }
 
         var allowed = GetAllowedDotNetTypesForSqlType(sqlType);
         if (allowed.Count == 0)
             throw new InvalidOperationException($"{fullName}: Result column {columnName} has unsupported SQL type {systemTypeName}.");
         if (!allowed.Contains(dotNetType))
-            throw new InvalidOperationException($"{fullName}: Result column {columnName} SQL type {systemTypeName} is not compatible with .NET type {dotNetType.Name}. Allowed: {string.Join(", ", allowed.Select(t => t.Name))}.");
+            throw new InvalidOperationException($"{fullName}: Result column {columnName} SQL type {systemTypeName} is not compatible with .NET type {DescribeDotNetType(dotNetType)}. Allowed: {string.Join(", ", allowed.Select(DescribeDotNetType))}.");
     }
 
-    private static bool IsNullableType(Type t)
+    // Type.Name is "Nullable`1" for every nullable value type, so a message built from it names the one
+    // thing the reader already knows and omits the type they need. Every message that renders a contract
+    // type goes through here, which is also why the offending type and the allowed list read alike.
+    private static string DescribeDotNetType(Type t) =>
+        Nullable.GetUnderlyingType(t) is { } underlying ? $"{underlying.Name}?" : t.Name;
+
+    internal static bool IsNullableType(Type t)
     {
         if (!t.IsValueType) return true;
         return Nullable.GetUnderlyingType(t) is not null;
     }
 
-    private static HashSet<Type> GetAllowedDotNetTypesForSqlType(string sqlType)
+    internal static HashSet<Type> GetAllowedDotNetTypesForSqlType(string sqlType)
     {
         return sqlType switch
         {
@@ -178,7 +205,15 @@ public static class StoredProcedureValidator
             "bit" => [typeof(bool), typeof(bool?)],
             "varchar" or "nvarchar" or "char" or "nchar" or "text" or "ntext" => [typeof(string)],
             "binary" or "varbinary" or "image" => [typeof(byte[])],
-            "datetime" or "datetime2" or "smalldatetime" or "date" or "time" => [typeof(DateTime), typeof(DateTime?), typeof(DateTimeOffset), typeof(DateTimeOffset?)],
+            "datetime" or "datetime2" or "smalldatetime" or "date" => [typeof(DateTime), typeof(DateTime?)],
+            // SqlDataReader hands back a TimeSpan for time, so listing DateTime here green-lit a contract
+            // the generated reader cannot materialise. TimeOnly is absent for the same reason: nothing
+            // emits a conversion to it, so admitting it would recreate the defect one type over.
+            "time" => [typeof(TimeSpan), typeof(TimeSpan?)],
+            // The only SQL type that carries an offset, and now the only one DateTimeOffset describes. The
+            // date and datetime arms above used to admit it too, which let a contract validate against a
+            // column whose offset the executor had already thrown away.
+            "datetimeoffset" => [typeof(DateTimeOffset), typeof(DateTimeOffset?)],
             "uniqueidentifier" => [typeof(Guid), typeof(Guid?)],
             "decimal" or "numeric" => [typeof(decimal), typeof(decimal?)],
             "real" => [typeof(float), typeof(float?)],

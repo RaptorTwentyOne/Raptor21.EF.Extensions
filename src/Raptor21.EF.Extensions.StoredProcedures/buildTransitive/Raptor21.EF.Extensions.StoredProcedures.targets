@@ -1,0 +1,41 @@
+<Project>
+
+  <!-- Why the same .sql file has to be BOTH an EmbeddedResource and an AdditionalFile.
+
+       They are two different consumers reading the same bytes at two different times, and neither
+       channel can serve the other:
+
+         * EmbeddedResource is the RUN-TIME channel. The procedure body has to travel inside the
+           assembly, because RegisterStoredProcedures(assembly, prefix) and EmbeddedScriptApplier read
+           it back through Assembly.GetManifestResourceStream at startup. That is the shipping copy.
+
+         * AdditionalFiles is the COMPILE-TIME channel. The source generator needs the same text to
+           read each parameter's name, type, length, precision, scale and OUTPUT direction out of the
+           procedure header, so the developer does not have to spell them out a second time as [Sql]
+           attributes. A generator cannot open the embedded resource - at generation time the assembly
+           does not exist yet - and it cannot open the file off disk either, because the generator
+           project sets EnforceExtendedAnalyzerRules and RS1035 makes System.IO.File a compile ERROR.
+           AdditionalFiles is the only channel Roslyn gives an analyzer for file content.
+
+       So the file is listed twice, and that is correct rather than redundant: one entry ships the
+       bytes, the other shows them to the compiler. Nothing is duplicated in the output - the
+       /additionalfile: entry produces no assembly content at all.
+
+       Derived FROM EmbeddedResource and never the reverse: adding a second EmbeddedResource for the
+       same file is NETSDK1022/CS1508. This is additive - the /resource: entry and its logical name are
+       untouched, so RegisterStoredProcedures(assembly, prefix) and EmbeddedScriptApplier keep reading
+       the same one file at run time.
+
+       A bare ItemGroup, not a Target: AdditionalFiles has to exist at evaluation time or the IDE
+       project system does not see it without a design-time build. AdditionalFileItemNames is the
+       other route and is worse - it promotes an entire item type wholesale, and Roslyn's own targets
+       flag it as a workaround (dotnet/roslyn#12223).
+
+       Set R21SqlScriptDiscovery=false to switch the whole feature off and go back to spelling every
+       [Sql] out, which keeps working forever. -->
+  <ItemGroup Condition="'$(R21SqlScriptDiscovery)' != 'false'">
+    <AdditionalFiles Include="@(EmbeddedResource->WithMetadataValue('Extension','.sql'))"
+                     Exclude="@(AdditionalFiles)" />
+  </ItemGroup>
+
+</Project>

@@ -8,8 +8,8 @@ dotnet test  Raptor21.EF.Extensions.slnx -c Release --no-build
 dotnet pack  Raptor21.EF.Extensions.slnx -c Release --no-build -o artifacts
 ```
 
-The runtime library multi-targets `net8.0` and `net10.0`, so both SDKs need to be installed. The
-generator targets `netstandard2.0` because Roslyn loads analyzers there; that is not negotiable.
+Everything targets `net10.0`, so one SDK is enough. The generator targets `netstandard2.0` because
+Roslyn loads analyzers there; that is not negotiable.
 
 ## The two halves, and why they stay apart
 

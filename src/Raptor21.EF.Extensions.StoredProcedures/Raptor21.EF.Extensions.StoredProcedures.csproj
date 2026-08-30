@@ -1,7 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <!-- net10.0 only, and deliberately. Nothing in this assembly touches Entity Framework - its one
+         dependency is Microsoft.Data.SqlClient - but the supported consumer is a code-first EF Core
+         project: the generator reads result-set shapes off the DbContext model, through the checked-in
+         ModelSnapshot, and Raptor21.EF.Extensions.Migrations carries EF Core 10, which ships net10.0
+         alone. A net8.0 asset here would only serve someone this project has decided not to serve. -->
+    <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>Raptor21.EF.Extensions.StoredProcedures</RootNamespace>
     <AssemblyName>Raptor21.EF.Extensions.StoredProcedures</AssemblyName>
     <!-- The point of the contract + source-generator design: nothing here is discovered by reflection,
@@ -21,6 +26,18 @@
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
   </ItemGroup>
 
+  <!-- The library's only InternalsVisibleTo. Twelve pure, I/O-free statics hold the SQL-type mapping
+       table, the parameter binding, the row materialiser and the type-compatibility matrix; every
+       public door in front of them opens a SqlConnection before the logic runs, so testing them offline
+       is otherwise impossible and the alternative - making them public - would widen a shipped API to
+       serve tests. The GO batch split is deliberately not among them: it needed a second caller in a
+       second assembly, so it left the applier for the public SqlBatch type rather than becoming an
+       internal the migration package could not have called. Compile-time only: no reflection, no
+       runtime cost, no effect on the trimming and AOT claims above. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Raptor21.EF.Extensions.StoredProcedures.Tests" />
+  </ItemGroup>
+
   <!-- The generator ships INSIDE this package as an analyzer, so one PackageReference gives a consumer
        both halves and no one can end up with a runtime and a generator of different versions.
        ReferenceOutputAssembly=false keeps it off this assembly's reference list, and leaving
@@ -36,11 +53,34 @@
     <None Include="$(_GeneratorDll)" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
   </ItemGroup>
 
+  <!-- The generator's only channel to the procedure bodies. The .sql files already ship as
+       EmbeddedResource so the runtime can read them back out of the assembly; the generator needs the
+       same text at COMPILE time to read each parameter's name, type, length, precision, scale and
+       OUTPUT direction out of the header. It cannot read the embedded resource (the assembly does not
+       exist yet) and it cannot read the disk (RS1035 makes System.IO.File a compile error in the
+       generator project), so the one file has to be listed twice: once as the shipping copy, once as
+       an AdditionalFile. This targets file is what performs the second listing in a consumer's build.
+
+       buildTransitive and that path only: NuGet imports it for direct and transitive references alike,
+       it survives PrivateAssets="all", and when a package ships both build/ and buildTransitive/ NuGet
+       silently writes only the buildTransitive import (NuGet/Home#12804). The file name must be exactly
+       <PackageId>.targets or NuGet refuses to import it at all (NU5129). -->
+  <ItemGroup>
+    <None Include="buildTransitive\Raptor21.EF.Extensions.StoredProcedures.targets"
+          Pack="true" PackagePath="buildTransitive" Visible="false" />
+  </ItemGroup>
+
   <!-- A package that quietly lost its generator still installs and still compiles - right up until the
-       consumer's first [StoredProcedure] method, which then simply never gets a body. Fail the pack. -->
+       consumer's first [StoredProcedure] method, which then simply never gets a body. Fail the pack.
+       A package that quietly lost its targets file fails the same way one step later: it installs, it
+       compiles, no .sql ever reaches the compiler, and every declaration that leans on inferred
+       parameter facts turns into SPG003. Both are invisible until a consumer hits them, so both fail
+       the pack here instead. -->
   <Target Name="EnsureGeneratorIsPacked" BeforeTargets="GenerateNuspec">
     <Error Condition="!Exists('$(_GeneratorDll)')"
            Text="Source generator not found at $(_GeneratorDll). A package without analyzers/dotnet/cs is useless; build the Generator project in this configuration before packing." />
+    <Error Condition="!Exists('$(MSBuildThisFileDirectory)buildTransitive\Raptor21.EF.Extensions.StoredProcedures.targets')"
+           Text="buildTransitive\Raptor21.EF.Extensions.StoredProcedures.targets is missing. Without it no .sql reaches the compiler, and every declaration that relies on inferred parameter facts fails with SPG003." />
   </Target>
 
 </Project>

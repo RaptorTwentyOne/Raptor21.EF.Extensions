@@ -16,6 +16,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Raptor21.EF.Extensions.StoredProcedures.Generator.Tests/Raptor21.EF.Extensions.StoredProcedures.Generator.Tests.csproj" />
     <Project Path="tests/Raptor21.EF.Extensions.Migrations.Tests/Raptor21.EF.Extensions.Migrations.Tests.csproj" />
+    <Project Path="tests/Raptor21.EF.Extensions.StoredProcedures.Tests/Raptor21.EF.Extensions.StoredProcedures.Tests.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/Raptor21.EF.Extensions.Sample/Raptor21.EF.Extensions.Sample.csproj" />

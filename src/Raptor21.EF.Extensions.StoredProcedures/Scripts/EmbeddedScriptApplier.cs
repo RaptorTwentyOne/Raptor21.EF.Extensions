@@ -29,6 +29,7 @@ public sealed class EmbeddedScriptApplier
     /// <param name="resourcePrefix">Resource name prefix (e.g. MyLib.DbScripts.).</param>
     /// <param name="useTransaction">If true, all scripts run in one transaction (default true).</param>
     /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="InvalidOperationException">A matching resource has no stream, or two resources resolve to the same script name.</exception>
     public static async Task ApplyEmbeddedScriptsAsync(
         string connectionString,
         Assembly assembly,
@@ -71,22 +72,48 @@ public sealed class EmbeddedScriptApplier
         }
     }
 
-    private static FrozenDictionary<string, string> LoadScripts(Assembly assembly, string resourcePrefix)
+    internal static FrozenDictionary<string, string> LoadScripts(Assembly assembly, string resourcePrefix)
     {
         var prefix = resourcePrefix.TrimEnd('.') + ".";
         var names = assembly.GetManifestResourceNames();
+
+        // OrdinalIgnoreCase, matching dbo.__DbScriptHistory.ScriptName, whose primary key lives under the
+        // database collation and is case-insensitive by default. Ordinal here would let two resources
+        // differing only in case both load and then contend for one history row, so each would re-run on
+        // every deployment. Losing one silently was worse; refusing both, below, costs nothing.
         var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // Which resource claimed each script name, so a collision can name BOTH files. Naming only the
+        // loser leaves the developer hunting for the one it collided with.
+        var origins = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var name in names)
         {
             if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !name.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            using var stream = assembly.GetManifestResourceStream(name)!;
+            // GetManifestResourceStream is documented to return null, and the assembly is a caller-supplied
+            // parameter, so the null-forgiving operator that used to stand here turned a reachable failure
+            // into an ArgumentNullException naming "stream" - a message mentioning neither the resource nor
+            // where it came from, thrown from a method whose entire job is loading resources.
+            using var stream = assembly.GetManifestResourceStream(name)
+                ?? throw new InvalidOperationException(
+                    $"Embedded resource '{name}' is listed by assembly '{assembly.FullName}' but has no stream.");
             using var reader = new StreamReader(stream, Encoding.UTF8);
             var content = reader.ReadToEnd();
             var scriptName = name[prefix.Length..];
-            dict[scriptName] = content;
+
+            // TryAdd and not an indexer assignment: two resources can reach the same script name, whether
+            // by differing only in case or by DbScripts/Sub/A.sql flattening onto DbScripts.Sub.A.sql. That
+            // key is the primary key in dbo.__DbScriptHistory, so a script lost here is one that never runs
+            // and never looks missing - which surfaces far away as the validator reporting a procedure
+            // absent whose .sql file is plainly in the repository.
+            if (!dict.TryAdd(scriptName, content))
+                throw new InvalidOperationException(
+                    $"Embedded resources '{origins[scriptName]}' and '{name}' in assembly '{assembly.FullName}' " +
+                    $"both yield script name '{scriptName}'.");
+
+            origins[scriptName] = name;
         }
 
         return dict.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
@@ -107,7 +134,7 @@ public sealed class EmbeddedScriptApplier
         if (await IsAlreadyAppliedAsync(conn, tx, scriptName, hash, ct).ConfigureAwait(false))
             return;
 
-        var batches = SplitBatches(content);
+        var batches = SqlBatch.Split(content);
         foreach (var batch in batches)
         {
             if (string.IsNullOrWhiteSpace(batch))
@@ -149,40 +176,10 @@ public sealed class EmbeddedScriptApplier
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
-    private static string ComputeSha256(string content)
+    internal static string ComputeSha256(string content)
     {
         var bytes = Encoding.UTF8.GetBytes(content);
         var hash = SHA256.HashData(bytes);
         return Convert.ToHexString(hash).ToLowerInvariant();
-    }
-
-    private static List<string> SplitBatches(string content)
-    {
-        var batches = new List<string>();
-        var sb = new StringBuilder();
-        var lines = content.Split('\n');
-
-        foreach (var raw in lines)
-        {
-            var line = raw.TrimEnd('\r', '\n').TrimEnd();
-            if (line.Equals("GO", StringComparison.OrdinalIgnoreCase))
-            {
-                if (sb.Length > 0)
-                {
-                    batches.Add(sb.ToString());
-                    sb.Clear();
-                }
-            }
-            else
-            {
-                if (sb.Length > 0) sb.AppendLine();
-                sb.Append(line);
-            }
-        }
-
-        if (sb.Length > 0)
-            batches.Add(sb.ToString());
-
-        return batches;
     }
 }

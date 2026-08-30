@@ -21,10 +21,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          # Both, because the runtime library multi-targets net8.0 alongside net10.0.
-          dotnet-version: |
-            8.0.x
-            10.0.x
+          dotnet-version: 10.0.x
 
       - name: Restore
         run: dotnet restore Raptor21.EF.Extensions.slnx
@@ -48,6 +45,13 @@ jobs:
           echo "Inspecting $pkg"
           if ! unzip -l "$pkg" | grep -q 'analyzers/dotnet/cs/.*\.dll'; then
             echo "::error::$pkg contains no analyzers/dotnet/cs/*.dll - the source generator was not packed."
+            unzip -l "$pkg"
+            exit 1
+          fi
+          # Same failure shape as a missing analyzer: with no targets file no .sql ever reaches the
+          # compiler, so every declaration that leaves a facet to the script silently loses it.
+          if ! unzip -l "$pkg" | grep -q 'buildTransitive/.*\.targets'; then
+            echo "::error::$pkg contains no buildTransitive/*.targets - .sql files would never reach the generator."
             unzip -l "$pkg"
             exit 1
           fi
