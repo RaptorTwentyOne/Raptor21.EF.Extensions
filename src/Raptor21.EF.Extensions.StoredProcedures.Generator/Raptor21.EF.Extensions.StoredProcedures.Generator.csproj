@@ -20,4 +20,14 @@
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" PrivateAssets="all" />
   </ItemGroup>
 
+  <!-- Every type in this project is internal, including ProcedureHeaderParser and the four models it
+       returns. The parser is a pure function over a string - no Roslyn, no driver, no compilation - so
+       it is the one part of this generator that can be tested for what it actually is rather than
+       through the emitted text, and that is worth an assembly-visibility line. The same precedent, and
+       the same reasoning, as the runtime library's single InternalsVisibleTo. Compile-time only: the
+       generator ships as an analyzer, so this costs a consumer nothing. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Raptor21.EF.Extensions.StoredProcedures.Generator.Tests" />
+  </ItemGroup>
+
 </Project>

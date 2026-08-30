@@ -33,28 +33,49 @@ internal static class EmittedAttributes
                 public string FullName { get; }
             }
 
-            /// <summary>Declares the SQL parameter name (mandatory, 1st arg) and optional SQL type/length/precision/scale for a parameter.</summary>
+            /// <summary>
+            /// Overrides what the procedure's .sql script says about a parameter. Every facet is optional:
+            /// whatever is stated here wins, and whatever is left unstated is read from the script - the
+            /// SQL name, type, length, precision and scale are all declared there already. The OUTPUT
+            /// direction is the one exception, read from the script only for a parameter carrying no
+            /// [Sql] at all, because flipping the direction of a call the attribute already describes
+            /// would move a contract that compiles today. The attribute is only needed where the script
+            /// is not the whole story.
+            /// </summary>
             [global::System.AttributeUsage(global::System.AttributeTargets.Parameter, AllowMultiple = false, Inherited = false)]
             [global::System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
             [global::System.CodeDom.Compiler.GeneratedCode("Raptor21.EF.Extensions.StoredProcedures.Generator", null)]
             internal sealed class SqlAttribute : global::System.Attribute
             {
+                public SqlAttribute() { }
                 public SqlAttribute(string name) { Name = name; }
                 public SqlAttribute(string name, int length) { Name = name; Length = length; }
                 public SqlAttribute(string name, string typeName) { Name = name; TypeName = typeName; }
                 public SqlAttribute(string name, string typeName, int length) { Name = name; TypeName = typeName; Length = length; }
 
-                /// <summary>SQL parameter name, e.g. "@AccountID". Mandatory.</summary>
-                public string Name { get; }
-                /// <summary>Explicit SQL type name override (e.g. "nvarchar"). When null, inferred from the .NET type.</summary>
-                public string? TypeName { get; }
-                /// <summary>Max length for string/binary types. -1 = unspecified.</summary>
-                public int Length { get; } = -1;
-                /// <summary>Decimal precision.</summary>
+                /// <summary>SQL parameter name, e.g. "@AccountID". When unstated, '@' + the C# parameter name is looked up in the procedure.</summary>
+                public string Name { get; set; } = "";
+                /// <summary>Explicit SQL type name override (e.g. "nvarchar"). When unstated, taken from the procedure, then from the .NET type.</summary>
+                public string? TypeName { get; set; }
+                /// <summary>
+                /// Max length for string/binary types. When unstated, taken from the procedure.
+                /// A negative value is read as unstated rather than as MAX: -1 was the first
+                /// generator's "unstated" sentinel, and reading it as MAX now would silently
+                /// re-write the contract of every declaration that already spells it that way.
+                /// To bind MAX, declare the parameter varchar(max) (or nvarchar(max),
+                /// varbinary(max)) in the procedure and let the script supply the length.
+                /// </summary>
+                public int Length { get; set; }
+                /// <summary>Decimal precision. When unstated, taken from the procedure.</summary>
                 public byte Precision { get; set; }
-                /// <summary>Decimal scale.</summary>
+                /// <summary>Decimal scale. When unstated, taken from the procedure.</summary>
                 public byte Scale { get; set; }
-                /// <summary>True for OUTPUT parameters (Faz 3).</summary>
+                /// <summary>
+                /// True for OUTPUT parameters. Read from the procedure only for a parameter carrying
+                /// no [Sql] at all, so an attributed parameter that leaves this unstated binds as an
+                /// input however the procedure declares it - which is a contract the startup
+                /// validator rejects when the procedure says OUTPUT, and is what SPG020 reports.
+                /// </summary>
                 public bool Output { get; set; }
             }
 
@@ -64,6 +85,62 @@ internal static class EmittedAttributes
             [global::System.CodeDom.Compiler.GeneratedCode("Raptor21.EF.Extensions.StoredProcedures.Generator", null)]
             internal sealed class SqlRowAttribute : global::System.Attribute
             {
+                /// <summary>
+                /// Takes the row's members from an EF Core entity type instead of from a primary
+                /// constructor: declare the row as <c>public partial record MyRow;</c> with no parameter
+                /// list, and the generator writes the parameter list from the model. The members, their
+                /// types, their column names and their nullability then come from one place instead of
+                /// being a second copy that goes quietly wrong the day the model changes.
+                /// <para>
+                /// The model is read from the EF Core ModelSnapshot in this compilation - the class
+                /// <c>dotnet ef migrations add</c> writes - as ordinary C# syntax. No database connection
+                /// is opened, no tool is run and no EF assembly is loaded. The row type, the method that
+                /// returns it and the snapshot must all be in the same project: a source generator sees
+                /// only the syntax trees of the compilation it runs on, and a referenced assembly's
+                /// snapshot carries no syntax at all.
+                /// </para>
+                /// <para>
+                /// Three things this changes, and each one can bite:
+                /// </para>
+                /// <list type="number">
+                /// <item><description>
+                /// <b>The member order is the model's</b> - primary key first, then alphabetical - and it
+                /// is neither the class's declaration order nor the table's column order. The procedure's
+                /// SELECT list must be written in that order, because startup validation compares result
+                /// columns positionally while the generated reader looks them up by name: a SELECT in a
+                /// different order fails with a column-name mismatch rather than with a wrong value.
+                /// </description></item>
+                /// <item><description>
+                /// <b>The member type is the model's stored type, not the class's.</b> A result-set reader
+                /// hands back the stored value and this generator cannot run a value converter, so a
+                /// converted or enum property makes the two disagree and the binding is refused (SPG032)
+                /// rather than emitting one under the other's name.
+                /// </description></item>
+                /// <item><description>
+                /// <b>Shadow properties are skipped silently.</b> A property the model knows about and the
+                /// class does not - a shadow foreign key, for instance - produces no member, so it must
+                /// not appear in the SELECT either.
+                /// </description></item>
+                /// </list>
+                /// <para>
+                /// The entity type must be one whose columns are exclusively its own: not in an
+                /// inheritance hierarchy, not owned, not sharing its table or view with another entity
+                /// type, and not split or complex-mapped. A column on a shared target is nullable whenever
+                /// any entity mapped there is optional and the snapshot cannot say so per column, so those
+                /// shapes are refused (SPG023-SPG026) instead of guessed at. A keyless entity declared
+                /// <c>HasNoKey().ToView("...")</c> is the intended way to describe a procedure's result
+                /// shape, and binds: the view is never queried and never created - EF excludes it from
+                /// migrations - so the object need not exist in the database. Only the property list, the
+                /// column names, the column types and the nullability are read from it.
+                /// </para>
+                /// <para>
+                /// <c>[SqlColumn]</c> has no attachment point on an Entity-bound row, because the
+                /// generator owns the members. Column names come from <c>HasColumnName</c>, else the
+                /// property name. A row that needs a per-column override is a row to write out as a
+                /// positional record, which keeps working exactly as before.
+                /// </para>
+                /// </summary>
+                public global::System.Type? Entity { get; set; }
             }
 
             /// <summary>Overrides the SQL result-set column name a row member maps to (defaults to the member name).</summary>
