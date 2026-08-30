@@ -31,4 +31,17 @@
     <EmbeddedResource Include="DbScripts\*.sql" />
   </ItemGroup>
 
+  <!-- The third thing a NuGet consumer gets for free, alongside the two ProjectReferences above: the
+       package's buildTransitive targets, which hand the same *.sql files to the compiler a second time
+       as AdditionalFiles so the generator can read the parameter declarations out of the procedure
+       headers. EmbeddedResource ships the bytes at run time; AdditionalFiles shows them to the
+       generator at compile time. Neither channel can do the other's job - see the targets file for why.
+
+       A ProjectReference does not import a referenced project's buildTransitive targets, so the sample
+       has to do it by hand. Imported rather than copied: this is the repo's only executable check on
+       the shipped file, and a copy would drift from it. It must sit BELOW the EmbeddedResource
+       ItemGroup, because an Import in a project body is evaluated in place and reads
+       @(EmbeddedResource) as it stands at that point. -->
+  <Import Project="..\..\src\Raptor21.EF.Extensions.StoredProcedures\buildTransitive\Raptor21.EF.Extensions.StoredProcedures.targets" />
+
 </Project>

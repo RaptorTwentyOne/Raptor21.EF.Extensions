@@ -32,9 +32,12 @@ procedures, migrated together, validated at startup, called through the generate
 <PackageReference Include="Raptor21.EF.Extensions.Migrations" Version="0.1.0-preview.1" />
 ```
 
-The generator arrives with the first package; there is nothing else to wire up.
+The generator arrives with the first package, and so does the build logic that shows it your `.sql`
+files. There is nothing else to wire up.
 
-Declare a group. Every `[StoredProcedure]` partial method is all you write:
+Declare a group. A `[StoredProcedure]` partial method is all you write — the parameters carry no
+attributes, because the generator reads their SQL names, types and lengths out of the procedure's own
+`CREATE PROCEDURE` header at compile time:
 
 ```csharp
 using Raptor21.EF.Extensions.StoredProcedures.Generated;
@@ -45,26 +48,26 @@ public partial class AccountProcedures
     // RETURN value (SQL Server RETURN is always int; short is also supported)
     [StoredProcedure("dbo.ACCOUNT_LOGIN")]
     public partial Task<int> LoginAsync(
-        [Sql("@AccountID", 21)] string accountId,   // varchar(21), inferred from string
-        [Sql("@Password", 28)]  string password,
+        string accountId,          // matched to @AccountID varchar(21) in ACCOUNT_LOGIN.sql
+        string password,           // matched to @Password  varchar(28)
         CancellationToken ct = default);
 
     // Result set -> typed rows
     [StoredProcedure("dbo.GET_CHARACTER_LIST")]
     public partial Task<IReadOnlyList<CharRow>> GetCharactersAsync(
-        [Sql("@AccountID", 21)] string accountId,
+        string accountId,
         CancellationToken ct = default);
 
     // Result set + RETURN value
     [StoredProcedure("dbo.GET_CHARACTER_LIST2")]
     public partial Task<(int ReturnValue, IReadOnlyList<CharRow> Rows)> GetCharactersWithReturnAsync(
-        [Sql("@AccountID", 21)] string accountId,
+        string accountId,
         CancellationToken ct = default);
 
     // No RETURN / result set consumed
     [StoredProcedure("dbo.TOUCH_LAST_LOGIN")]
     public partial Task TouchLastLoginAsync(
-        [Sql("@AccountID", 21)] string accountId,
+        string accountId,
         CancellationToken ct = default);
 }
 
@@ -84,6 +87,38 @@ The call site is fully type-checked — wrong argument types or counts won't com
 ```csharp
 var ret = await accountProcedures.LoginAsync(accountId, password, ct);
 ```
+
+### Where the parameter facts come from
+
+Every `.sql` you already ship as an `EmbeddedResource` is handed to the compiler a second time as an
+`AdditionalFiles` item — the package's `buildTransitive` targets do that for you, so a
+`PackageReference` is the whole setup. The generator parses each `CREATE`/`ALTER PROCEDURE` header and
+matches a C# parameter to the SQL parameter named `@` + its name, ignoring case; an inferred name is
+emitted with the procedure's own spelling, so `string sku` looks up `@sku`, matches `@Sku` and emits
+`@Sku`. Matching is by name only — there is no positional fallback,
+because one that landed wrong would send a value to the wrong parameter, and the startup validator,
+which compares by position too, could not catch it.
+
+The merge is per facet, not per parameter:
+
+| Facet | First | Then | Last resort |
+|---|---|---|---|
+| SQL name | `[Sql("@x")]` | the procedure parameter named `@` + the C# name | — (**SPG003**) |
+| SQL type | `[Sql]` | the procedure | the .NET type (**SPG005** if none) |
+| length, precision, scale | `[Sql]` | the procedure | left unspecified |
+| `Output` | any `[Sql]` at all decides it | the procedure | `false` |
+
+A declaration that spells every facet out therefore generates exactly what it generated before, with or
+without a script in sight: upgrading cannot break a build that compiles today.
+
+Scripts declared as `None` or `Content`, or added to `EmbeddedResource` after the package's targets are
+imported, are not discovered — **SPG014** says so — and need an explicit
+`<AdditionalFiles Include="DbScripts\*.sql" />`. Set
+`<R21SqlScriptDiscovery>false</R21SqlScriptDiscovery>` to switch discovery off entirely: no script is
+read, nothing is inferred, the script-derived diagnostics SPG010–SPG020 have nothing left to report, and
+every parameter needs its `[Sql]` again, exactly as before. SPG014 is the one that still speaks, on
+purpose — a parameter left without an attribute is an SPG003 error either way, and SPG014 is what tells
+you the channel that would have answered it is off rather than empty.
 
 ### Dependency injection
 
@@ -148,21 +183,39 @@ not yet notice procedure-only edits, and `migrations script --idempotent` wraps 
 
 ---
 
-## `[Sql]` attribute
+## `[Sql]` — overriding the script
 
-`[Sql]`'s first argument is the **mandatory** SQL parameter name (must start with `@`).
-The SQL type is inferred from the .NET type; length/precision/scale or an explicit type
-name can be supplied.
+`[Sql]` is optional, and so is every facet inside it: what you state wins, what you leave out is read
+from the procedure. Reach for it where the script cannot answer — the procedure is not part of this
+compilation, the C# parameter name deliberately differs from the SQL one, or the header itself is not to
+be trusted, as a bare `varchar` with no length is (SQL Server reads that as `varchar(1)`; **SPG012**
+points at them). A name you do state must still start with `@` (**SPG004**). Some headers cannot answer
+at all: a parameter the procedure types as `sql_variant`, `timestamp`, `sysname`, a spatial type, a
+table-valued parameter or a `CURSOR` has no binding here, and the generator will not guess one from the
+.NET type — **SPG016** asks you to state the type or change the procedure.
+
+Where you leave a facet out and the script supplies it, **SPG017** notes the value the emitted contract
+moved to. It is a warning and not a note, because the facet it reports is the one that turns a check
+the validator used to skip into one it enforces: a stale script can move a contract that compiles today
+into a startup failure. It stays silent when the fill changes nothing. State the facet in `[Sql]` if you
+would rather pin the binding the declaration had before any script was read.
 
 ```csharp
-[Sql("@AccountID", 21)]                 // varchar(21) inferred from string
-[Sql("@AccountID")]                     // length not validated
-[Sql("@AccountID", "nvarchar", 21)]     // explicit type override
+[Sql("@AccountID", 21)]                      // name + length; the type still comes from the script
+[Sql("@AccountID")]                          // name only — type and length come from the script
+[Sql(Length = 21)]                           // length only — name and type come from the script
+[Sql("@AccountID", "nvarchar", 21)]          // explicit type override; nothing left to infer
 [Sql("@Price", Precision = 18, Scale = 2)]   // decimal(18,2)
-[Sql("@Count", "int", Output = true)]   // OUTPUT direction + IsOutput in the contract
+[Sql("@Count", "int", Output = true)]        // OUTPUT direction + IsOutput in the contract
 ```
 
+Where the attribute and the procedure both state a facet and disagree, the attribute wins and the
+generator reports **SPG010**: one of the two is wrong, and a contract that disagrees with the deployed
+procedure fails startup validation.
+
 ### .NET → SQL type inference
+
+Consulted only when neither the attribute nor the procedure states a type.
 
 | .NET | SQL | | .NET | SQL |
 |------|-----|-|------|-----|
@@ -193,14 +246,17 @@ name can be supplied.
 
 ### OUTPUT parameters
 
-Mark a parameter `[Sql("@x", ..., Output = true)]` and surface its value through the return
-tuple: element `[0]` is the RETURN value, the rest correspond to the `Output = true`
-parameters in declaration order.
+An OUTPUT parameter's value is surfaced through the return tuple: element `[0]` is the RETURN value,
+the rest correspond to the OUTPUT parameters in declaration order. The direction is read from the
+procedure header like any other facet — but only for a parameter carrying no `[Sql]` at all. Put any
+`[Sql]` on it and the attribute becomes authoritative for the direction too, so `Output = true` has to
+be spelled out there; that is what guarantees an existing declaration cannot change its OUTPUT arity
+the day a script appears.
 
 ```csharp
 [StoredProcedure("dbo.RESERVE_ID")]
 public partial Task<(int ReturnValue, int NewId)> ReserveIdAsync(
-    [Sql("@Prefix", 10)] string prefix,
+    string prefix,                                     // @Prefix, read from the script
     [Sql("@NewId", "int", Output = true)] int newId,   // seed ignored for pure OUTPUT; result returned
     CancellationToken ct = default);
 
@@ -209,18 +265,100 @@ var (ret, newId) = await procs.ReserveIdAsync("AB", 0, ct);
 
 The output parameter stays in the signature (its passed value seeds INPUT-OUTPUT procedures
 and is ignored by SqlClient for pure OUTPUT). The tuple element count after the RETURN value
-must equal the number of `Output = true` parameters (else **SPG009**).
+must equal the number of OUTPUT parameters in force (else **SPG009**). A method with no tuple at all is
+the case SPG009 cannot see, and **SPG018** covers it: if the script says OUTPUT, the parameter carries no
+`[Sql]` to say otherwise, and the return type has no element to receive the value, the procedure would
+write it back into nothing.
+
+## Row types from the EF model
+
+A result row can be written out member by member, and always can be:
+
+```csharp
+[SqlRow]
+public partial record ProductRow(
+    [SqlColumn("Id")] int Id, string Sku, string Name, decimal Price, DateTime UpdatedUtc);
+```
+
+Or it can name the entity the procedure reads, and the generator takes the members from the EF model:
+
+```csharp
+[SqlRow(Entity = typeof(Product))]
+public partial record ProductRow;
+```
+
+The members come from your `ModelSnapshot` - the file `dotnet ef migrations add` writes - read as
+ordinary C# in the same compilation. Nothing runs, nothing connects, and the generator references no
+EF assembly: it reads `Property<T>` for the CLR type, `IsRequired()` and the key list for nullability,
+and `HasColumnName` for the column name. Because the snapshot is what EF itself reconciles every
+configuration route into, it does not matter whether you configured the entity with data annotations,
+with fluent `OnModelCreating`, with an `IEntityTypeConfiguration`, or by convention.
+
+**The member order is the model's, not your class's** - EF orders the key first, then the rest
+alphabetically - and the contract is positional, so your `SELECT` list has to match it. For `Product`
+that is `Id, Name, Price, Sku, UpdatedUtc`. If you would rather fix the order at the call site, write
+the record out by hand; both styles are supported and neither is legacy.
+
+**Where it refuses.** The binding declines rather than guess, and every refusal is an error naming the
+construct. The important one is a table more than one entity maps to: under TPH - EF's default
+inheritance strategy - a derived type's non-nullable property is mapped to a *nullable* column, so a
+row generated from the property would read `GetDecimal` on a column that can be NULL and throw on the
+first sibling row. Inheritance, owned types, table splitting and value converters are all refused for
+the same reason: the snapshot does not carry enough to be right, so it says so instead. Write the
+record by hand for those.
+
+A value converter whose provider type equals its CLR type - `decimal` to `decimal`, `string` to
+`string` - leaves no trace in the snapshot and cannot be detected. That case binds the *stored* value
+silently, and is the one blind spot in the refusal set.
 
 ## Diagnostics
 
-| ID | Meaning |
-|----|---------|
-| SPG001 | group class is not `partial` |
-| SPG002 | unsupported method return type |
-| SPG003 | parameter missing `[Sql]` |
-| SPG004 | SQL parameter name empty / not starting with `@` |
-| SPG005 | parameter .NET type has no inferable SQL type |
-| SPG006 | `[SqlRow]` type is not a partial positional record |
-| SPG007 | result row type is not marked `[SqlRow]` |
-| SPG008 | row member type has no supported `IDataRecord` reader |
-| SPG009 | return tuple arity does not match the `Output = true` parameters |
+| ID | Severity | Meaning |
+|----|----------|---------|
+| SPG001 | Error | group class is not `partial` |
+| SPG002 | Error | unsupported method return type |
+| SPG003 | Error | parameter has no SQL name: no `[Sql]`, and no matching parameter in the procedure |
+| SPG004 | Error | SQL parameter name empty / not starting with `@` |
+| SPG005 | Error | no SQL type from `[Sql]`, from the procedure, or from the .NET type |
+| SPG006 | Error | `[SqlRow]` type is not a partial positional record |
+| SPG007 | Error | result row type is not marked `[SqlRow]` |
+| SPG008 | Error | row member type has no supported `IDataRecord` reader |
+| SPG009 | Error | return tuple arity does not match the OUTPUT parameters |
+| SPG010 | Warning | `[Sql]` and the procedure state one facet differently; the attribute wins |
+| SPG011 | Warning | the procedure declares a parameter the method does not carry |
+| SPG012 | Warning | a char/binary procedure parameter has no length, which SQL Server reads as `(1)` |
+| SPG013 | Warning | the type the procedure declares cannot bind the parameter's .NET type |
+| SPG014 | Warning | no `.sql` declaring this procedure reached the compiler |
+| SPG015 | Warning | two `.sql` files declare the same procedure; nothing is inferred for it |
+| SPG016 | Error | the procedure types the parameter with something unbindable (`sql_variant`, `timestamp`, `sysname`, a spatial type, a TVP, a `CURSOR`) and no `[Sql]` states a type |
+| SPG017 | Warning | the procedure supplied a facet the `[Sql]` left unstated, and the emitted contract moved |
+| SPG018 | Error | the procedure says OUTPUT, no `[Sql]` says otherwise, and the return type has nowhere to put the value |
+| SPG019 | Warning | the procedure declares a construct the generator cannot map, so the .NET inference was kept |
+| SPG020 | Warning | the procedure declares the parameter `OUTPUT` and the `[Sql]` states no direction |
+| SPG021 | Error | `[SqlRow(Entity = ...)]` type is not a partial record |
+| SPG022 | Error | `[SqlRow(Entity = ...)]` type also declares its own primary constructor |
+| SPG023 | Error | the entity shares its table or view with another entity type |
+| SPG024 | Error | the entity is part of an inheritance hierarchy |
+| SPG025 | Error | the entity is owned by another entity type |
+| SPG026 | Error | the entity is mapped through a construct this reader does not bind |
+| SPG027 | Error | no EF Core model snapshot in this compilation |
+| SPG028 | Error | `Entity` names a type that is not an entity type in any snapshot |
+| SPG029 | Error | two snapshots describe the entity differently |
+| SPG030 | Error | a model property has no `IDataRecord` reader |
+| SPG031 | Error | column type and .NET type are not a pair `StoredProcedureValidator` accepts |
+| SPG032 | Error | the model's store type and the class member's type disagree (a value converter) |
+| SPG033 | Error | the entity contributed no members: every mapped property is a shadow property |
+
+SPG001–SPG009 judge your C#; SPG010–SPG020 judge what the `.sql` says about it, and they are the reason
+promoting scripts to a compile-time input is safe. The file is evidence, not authority: a disagreement
+between it and the code is reported and then decided in favour of the code, so a stale or hand-edited
+`.sql` cannot turn a compiling project into a wall of errors.
+
+The script-derived diagnostics that *do* stop a build are held to a rule stricter than their severity:
+each can fire only on a parameter that carries no `[Sql]` attribute at all — and such a parameter is an
+SPG003 error already, before any script is read. A `.sql` is allowed to rescue a declaration the
+generator used to reject; it is never allowed to reject one it used to accept. That is what makes
+upgrading safe for a codebase that compiles today.
+
+Silence them one at a time with `<NoWarn>`, or take the whole channel out with
+`<R21SqlScriptDiscovery>false</R21SqlScriptDiscovery>`.

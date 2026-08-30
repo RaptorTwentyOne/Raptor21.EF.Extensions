@@ -44,3 +44,17 @@ foreach (var row in bySku)
 
 var (total, page) = await procedures.ListAsync(10);
 Console.WriteLine($"Listed {page.Count} of {total} products.");
+
+// The same kind of call, with the row type's members generated from the EF model rather than written
+// out by hand. The two row types this sample calls through are the two answers to one question - who
+// says what the shape is. ProductRow: a C# file does, and always may. ProductListRow: the model does,
+// and the developer says which entity.
+//
+// ProductListRow is `[SqlRow(Entity = typeof(ProductListResult))] partial record` and
+// nothing else. Its four members, their types, their column names and their nullability came out of
+// Migrations/CatalogDbContextModelSnapshot.cs at compile time - no reflection here either, and no
+// database was consulted to produce them. vw_ProductList is never created and never queried; the
+// keyless entity exists to say "this is a result shape, not a table".
+var listed = await procedures.ListViewAsync(10);
+foreach (var row in listed)
+    Console.WriteLine($"  {row.Id,4}  {row.Sku,-10} {row.Name,-20} {row.Price,10:N2}");
