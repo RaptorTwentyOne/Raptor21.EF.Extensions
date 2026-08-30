@@ -53,4 +53,42 @@ public static partial class StoredProcedureScript
     }
 
     private static string Unbracket(string ident) => ident.Trim().Trim('[', ']');
+
+    /// <summary>
+    /// Wraps one procedure script as <c>EXEC(N'...')</c> so it survives being nested inside another
+    /// statement.
+    /// </summary>
+    /// <exception cref="ArgumentException">The script contains a line reading <c>GO</c>.</exception>
+    public static string WrapInExec(string sql)
+    {
+        ArgumentNullException.ThrowIfNull(sql);
+
+        // Defence in depth: ParseQualifiedName already refuses such a script at registration, so nothing
+        // on the differ's path arrives here carrying one. The method is public, so the precondition is
+        // restated rather than left in another type.
+        if (SqlBatch.ContainsSeparator(sql))
+            throw new ArgumentException(
+                "Script contains a line reading 'GO' and cannot be wrapped: EXEC runs its argument as a " +
+                "single batch. Wrap one batch at a time.",
+                nameof(sql));
+
+        // CREATE OR ALTER PROCEDURE has to be the first statement in its batch, and it is first in none of
+        // the scripts EF writes. `migrations script --idempotent` puts `IF NOT EXISTS (...) BEGIN` in front
+        // of every command, and even the plain `migrations script` opens a BEGIN TRANSACTION and then
+        // separates commands with a newline rather than a batch terminator. EXEC compiles its argument as
+        // a batch of its own, which satisfies the rule in both - which is also why the wrap is
+        // unconditional: gating it on the idempotent flag, the way EF's own SqlServerMigrationsSqlGenerator
+        // gates GenerateExecWhenIdempotent, would leave the plain script just as invalid as it is today.
+        //
+        // THE ESCAPING RULE, in full: double every single quote, and emit exactly ONE N'...' literal.
+        // Doubling is safe on text that already contains doubled quotes, because it escapes a character
+        // rather than re-parsing a construct. Nothing else needs escaping: inside a string literal `--`,
+        // `/* */` and the word GO are all just characters.
+        //
+        // One literal, never a concatenation. Each concatenated piece is typed on its own, which
+        // reintroduces the 4,000-character cliff a single N'...' constant is promoted past, and a
+        // truncated body is far worse than a syntax error because it deploys.
+        var literal = sql.TrimEnd('\n', '\r', ';').Replace("'", "''");
+        return $"EXEC(N'{literal}');";
+    }
 }

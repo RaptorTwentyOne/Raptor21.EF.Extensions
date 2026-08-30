@@ -197,6 +197,16 @@ surface is not a compatibility commitment.
 - `[Sql]` gained a parameterless constructor and a settable `Name`, so a single facet can be overridden
   and the rest left to the script — `[Sql(Length = 8000)]` on a parameter whose procedure header says
   `varchar` and nothing more.
+- **Breaking: `StoredProcedureDiff.Compute` now returns a wrapped script for `ProcOpKind.CreateOrAlter`.**
+  `ProcOp.Sql` is `EXEC(N'<escaped script>');`, not the script as written, so a direct caller — `Compute`,
+  `ProcOp` and `ProcOpKind` are all public — gets different SQL out of unchanged code of its own. Read the
+  value as the statement to run rather than as the script that was handed in: the wrap is
+  `StoredProcedureScript.WrapInExec`, which is public for exactly that reason, and it is undone by
+  stripping the `EXEC(N'` and `');` and halving every doubled quote — recovering the script but for the
+  trailing `;` and newline the wrap trims off. `ProcOpKind.Drop` is untouched. The wrap lives in the diff
+  rather than in a custom `IMigrationsSqlGenerator` so that the consumer keeps a single `ReplaceService`
+  — a second one, forgotten, would silently reproduce the defect it exists to fix — and the visible cost
+  is that a scaffolded migration now reads `EXEC(N'...')` instead of the bare script.
 
 ### Fixed
 
@@ -207,18 +217,56 @@ surface is not a compatibility commitment.
   `ArgumentNullException("stream")`.
 - `dotnet pack` of the generator used to fail with NU5017 (`IncludeBuildOutput=false` and nothing to
   pack). The generator is no longer its own package, so the failure is gone by construction.
+- `dotnet ef migrations has-pending-model-changes` sees a procedure-only edit, because
+  `StoredProcedureModelDiffer` now overrides `HasDifferences` as well as `GetDifferences`. EF reaches its
+  two answers down separate paths — `HasDifferences` stops at the first difference the protected `Diff`
+  produces, `GetDifferences` sorts everything `Diff` produced — so overriding the second alone left the
+  command answering the wrong question: it reported a model as up to date while the very next
+  `migrations add` would have written a migration, and that command is what teams gate CI on. The same
+  blindness silenced the `PendingModelChangesWarning` that `Migrate()` raises and let `migrations remove`
+  treat a procedure-only migration as one it could revert. The procedure verdict is ORed onto EF's own,
+  never substituted for it, so a table-only change still reports `true`; and both entry points reach it
+  through one private helper, because a `HasDifferences` that disagreed with the differ would be worse
+  than the gap it closes — the command would answer "no changes" and the migration EF then scaffolds
+  would contradict it.
+- `dotnet ef migrations script --idempotent` produces valid T-SQL. `CREATE OR ALTER PROCEDURE` must be
+  the first statement in its batch and is first in none of the scripts EF writes: `--idempotent` puts
+  `IF NOT EXISTS (SELECT ... FROM [__EFMigrationsHistory]) BEGIN` in front of every command, and even the
+  plain `migrations script` opens a `BEGIN TRANSACTION` and then separates commands with a newline rather
+  than a batch terminator, so SQL Server rejected both. The procedure is now emitted through
+  `EXEC(N'...')`, which compiles its argument as a batch of its own and so is legal in either — and
+  unconditionally, because gating the wrap on the idempotent flag, the way EF's own generator gates
+  `GenerateExecWhenIdempotent`, would have left the plain script exactly as invalid as it was. The
+  escaping is one `N'...'` literal with every single quote doubled: doubling escapes a character rather
+  than re-parsing a construct, so a body that already contains `''` survives being doubled again, and
+  inside a string literal `--`, `/* */` and a line reading `GO` are all merely characters. It is
+  deliberately not a `'...' + '...'` concatenation, which types each piece on its own and so reintroduces
+  the 4,000-character cliff a single literal is promoted past — a body that deploys truncated is a far
+  worse failure than one that refuses to parse. Both fixes are pinned by tests that drive EF's real SQL
+  Server provider, through `IMigrator.GenerateScript` and `IRelationalModel`, and neither opens a
+  connection: CI still needs no database.
 
 ### Known gaps
 
-Most are carried over from the audit that preceded this extraction. Three are new and marked as
-such below: the batch scanner does not track double quotes, analyzers do not flow across the new
-transitive dependency, and script ordering became visible once the collision was made loud.
+Most are carried over from the audit that preceded this extraction; the ones this release introduced
+are marked NEW. Two of those are the price of wrapping a procedure in `EXEC(N'...')` so that idempotent
+scripts parse at all, and both are stated with the paths they do and do not affect.
 
+- NEW, and a consequence of the `EXEC(N'...')` wrap: `migrations script --idempotent` indents every
+  line of a command by four spaces, and because the procedure body now lives inside the literal, that
+  indentation is executed as part of the string. The procedure runs correctly, but the text SQL Server
+  stores in `sys.sql_modules.definition` is not byte-identical to the `.sql` file — which will matter
+  to the drift check that is still on the list, and shifts the line numbers in a runtime error by the
+  indent. `dotnet ef database update` is unaffected; only the generated script indents.
+- NEW, same cause: a procedure body may legally contain a line reading `GO` inside a string literal —
+  `SqlBatch` correctly treats it as content, and the runtime applier runs it. In a generated script
+  that line ends up inside the `EXEC(N'...')` literal, and `sqlcmd`'s batch scanner is line-based and
+  does not know it is inside a literal, so it cuts there and the deployment fails with a syntax error.
+  Loud rather than silent, and only on the `sqlcmd` path — `database update` and SSMS are unaffected.
+  Refusing such a body outright was tried and rejected: it removes a capability that works on every
+  other path, and re-splits the `GO` rule that this release just unified.
 - Only stored procedures are first-class. Functions, views, triggers, table types and sequences have no
   contract, no validator and no migration support.
-- `HasDifferences` is not overridden, so `dotnet ef migrations has-pending-model-changes` does not see
-  procedure-only edits; `migrations script --idempotent` wraps `CREATE OR ALTER` in `IF ... BEGIN`, which
-  SQL Server rejects.
 - `decimal` declared without an explicit scale still defaults the scale to 0, so a contract that omits
   it truncates.
 - Scripts are applied in `FrozenDictionary` enumeration order, which is unspecified and can differ

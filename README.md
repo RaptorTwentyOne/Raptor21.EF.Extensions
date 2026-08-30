@@ -176,10 +176,22 @@ the diff is against what was last migrated, not against the database.
 Each script must be a single `CREATE OR ALTER PROCEDURE` batch — no `GO` separators, and `CREATE OR
 ALTER` rather than plain `CREATE`, because idempotency is what makes re-running a migration safe.
 
-Two limits worth knowing before you rely on this: `dotnet ef migrations has-pending-model-changes` does
-not yet notice procedure-only edits, and `migrations script --idempotent` wraps the operation in
-`IF ... BEGIN`, which SQL Server rejects for `CREATE OR ALTER`. Both are listed in
-[CHANGELOG.md](CHANGELOG.md) under known gaps.
+`dotnet ef migrations has-pending-model-changes` notices a procedure-only edit. EF reaches the differ
+through two entry points, and `StoredProcedureModelDiffer` overrides both: overriding only the one
+`migrations add` uses left that command reporting a model as up to date while the next `migrations add`
+would in fact have written a migration — which is the wrong answer to gate CI on. The same override is
+what raises `PendingModelChangesWarning` from `Migrate()` when only a procedure moved.
+
+`migrations script --idempotent` produces valid T-SQL (with two caveats — see the CHANGELOG's known
+gaps: the generated script indents the body inside the literal, and a body containing a line reading `GO`
+inside a string literal is cut by `sqlcmd`). `CREATE OR ALTER PROCEDURE` has to be the first
+statement in its batch, so a procedure travels inside `EXEC(N'...')` and executes as a nested batch of its
+own: every single quote in the body is doubled, and the body is emitted as one literal rather than a
+concatenation, which would reintroduce a truncation limit that a single `N'...'` constant is promoted
+past. The wrap is unconditional, because plain `migrations script` is no safer — it opens a
+`BEGIN TRANSACTION` and separates commands with a newline rather than a batch terminator. The visible
+cost is that the scaffolded migration and the generated script read `EXEC(N'...')` around the procedure
+instead of the bare body. `DROP PROCEDURE IF EXISTS` is bound by no such rule and is left unwrapped.
 
 ---
 

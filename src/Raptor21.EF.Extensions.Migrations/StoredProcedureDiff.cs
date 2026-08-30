@@ -22,7 +22,10 @@ public static class StoredProcedureDiff
 {
     /// <summary>
     /// Computes the procedure operations to turn <paramref name="source"/> into <paramref name="target"/>.
-    /// Keys are canonical <c>schema.name</c>; values are the full CREATE OR ALTER scripts.
+    /// Keys are canonical <c>schema.name</c>; values are the full CREATE OR ALTER scripts. A
+    /// <see cref="ProcOpKind.CreateOrAlter"/> step carries the script already wrapped by
+    /// <see cref="StoredProcedureScript.WrapInExec"/>, so <see cref="ProcOp.Sql"/> is the statement to run
+    /// rather than the script as written.
     /// </summary>
     public static IReadOnlyList<ProcOp> Compute(
         IReadOnlyDictionary<string, string> source,
@@ -40,8 +43,15 @@ public static class StoredProcedureDiff
             var inTarget = target.TryGetValue(name, out var targetSql);
             var inSource = source.TryGetValue(name, out var sourceSql);
 
+            // Only this branch is wrapped. CREATE OR ALTER PROCEDURE must be the first statement in its
+            // batch and never is in a generated script; the DROP below carries no such rule, is already
+            // valid inside EF's IF NOT EXISTS ... BEGIN ... END, and wrapping it would only hide what the
+            // migration does behind a string literal. The cost of wrapping here rather than in a custom
+            // IMigrationsSqlGenerator is that the scaffolded migration reads EXEC(N'...') instead of the
+            // bare script; the gain is that the consumer keeps a single ReplaceService, and forgetting a
+            // second one would silently reproduce exactly this defect.
             if (inTarget && (!inSource || !ScriptEquals(sourceSql!, targetSql!)))
-                ops.Add(new ProcOp(name, ProcOpKind.CreateOrAlter, targetSql!));
+                ops.Add(new ProcOp(name, ProcOpKind.CreateOrAlter, StoredProcedureScript.WrapInExec(targetSql!)));
             else if (!inTarget && inSource)
                 ops.Add(new ProcOp(name, ProcOpKind.Drop, $"DROP PROCEDURE IF EXISTS {StoredProcedureScript.Bracket(name)};"));
         }
