@@ -126,13 +126,20 @@ public class SqlTypeMappingTests
     [Theory]
     [InlineData("datetime")]
     [InlineData("datetime2")]
-    [InlineData("date")]
-    public void ApplySqlType_DateAndDateTimeNames_MapToDateTime2(string typeName)
+    public void ApplySqlType_DateTimeNames_MapToDateTime2(string typeName)
     {
-        // Three names, one SqlDbType. For these three the collapse is harmless: datetime2 is a superset
-        // of datetime's range, and a date is a datetime2 at midnight. The two names for which the same
-        // branch is NOT harmless get their own tests below.
+        // Two names, one SqlDbType, and the collapse is harmless: datetime2 is a superset of datetime's
+        // range. The names for which the same branch would NOT be harmless get their own tests.
         Assert.Equal(SqlDbType.DateTime2, Map(new SqlTypeSpec(typeName)).SqlDbType);
+    }
+
+    [Fact]
+    public void ApplySqlType_Date_MapsToSqlDbTypeDate()
+    {
+        // date used to ride along with datetime2 on the argument that a date is a datetime2 at midnight.
+        // True of the value, needless for the binding: date has its own SqlDbType, and sending datetime2
+        // instead makes the server convert on every call for nothing.
+        Assert.Equal(SqlDbType.Date, Map(new SqlTypeSpec("date")).SqlDbType);
     }
 
     [Fact]

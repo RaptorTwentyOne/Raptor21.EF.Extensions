@@ -444,12 +444,21 @@ internal static class ProcedureHeaderParser
                         scale = (byte)arguments[1].Value;
                     break;
 
-                case SqlTypeFamily.NoArgument:
                 case SqlTypeFamily.FractionalSeconds:
+                    // datetime2(3), time(3) and datetimeoffset(3) carry their fractional-seconds digits
+                    // as a scale. Recording it costs nothing and buys two things: the parameter is bound
+                    // with the precision the procedure declares instead of SqlClient's default 7, and
+                    // StoredProcedureValidator gains a scale to compare against sys.parameters - which it
+                    // skips entirely while the contract states none.
+                    typeName = normalised;
+                    if (arguments.Count > 0 && !arguments[0].IsMax && arguments[0].Value <= byte.MaxValue)
+                        scale = (byte)arguments[0].Value;
+                    break;
+
+                case SqlTypeFamily.NoArgument:
                 case SqlTypeFamily.Approximate:
-                    // datetime2(7), time(3), datetimeoffset(7) and float(24) are parsed and then not
-                    // recorded: RenderSqlType has no scale-without-precision branch, ApplySqlType
-                    // ignores the argument for those types, and every FLOAT maps to SqlDbType.Float.
+                    // float(24) is parsed and then not recorded: every FLOAT maps to SqlDbType.Float, so
+                    // the mantissa digits change nothing the contract could carry.
                     typeName = normalised;
                     break;
 

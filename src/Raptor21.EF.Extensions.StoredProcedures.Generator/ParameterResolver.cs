@@ -422,6 +422,13 @@ internal static class ParameterResolver
             return $"new {ContractsNs}.SqlTypeSpec(\"{sqlTypeName}\", {length.Value.ToString(CultureInfo.InvariantCulture)})";
         }
 
+        // Scale with no precision beside it: the fractional-seconds types. Positional arguments, so the
+        // two nulls in the middle are load bearing - SqlTypeSpec is (name, MaxLength, Precision, Scale).
+        if (scale.HasValue)
+        {
+            return $"new {ContractsNs}.SqlTypeSpec(\"{sqlTypeName}\", null, null, (byte){scale.Value.ToString(CultureInfo.InvariantCulture)})";
+        }
+
         return $"new {ContractsNs}.SqlTypeSpec(\"{sqlTypeName}\")";
     }
 

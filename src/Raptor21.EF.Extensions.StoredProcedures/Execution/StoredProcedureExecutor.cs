@@ -178,6 +178,21 @@ public sealed class StoredProcedureExecutor : IStoredProcedureExecutor
         return p;
     }
 
+    /// <summary>
+    /// Applies the fractional-seconds digits of a datetime2, time or datetimeoffset parameter.
+    /// </summary>
+    /// <remarks>
+    /// Only when the contract states them. SqlClient defaults an unstated scale to 7, which is what the
+    /// server would use for an undecorated declaration anyway, so saying nothing is the correct answer
+    /// rather than a gap - and writing 0 there would silently truncate every value to whole seconds.
+    /// </remarks>
+    private static void ApplyFractionalSecondsScale(SqlParameter p, SqlTypeSpec spec, int? firstArgument)
+    {
+        var scale = spec.Scale ?? (firstArgument is >= 0 and <= 7 ? (byte)firstArgument.Value : (byte?)null);
+        if (scale.HasValue)
+            p.Scale = scale.Value;
+    }
+
     internal static void ApplySqlType(SqlParameter p, SqlTypeSpec spec)
     {
         // A default SqlTypeSpec carries a null name and is reachable from any hand-written contract.
@@ -268,18 +283,24 @@ public sealed class StoredProcedureExecutor : IStoredProcedureExecutor
 
             case "DATETIMEOFFSET":
                 p.SqlDbType = SqlDbType.DateTimeOffset;
+                ApplyFractionalSecondsScale(p, spec, firstArgument);
                 break;
-            // datetime2 is a superset of datetime's range and a date is a datetime2 at midnight, so these
-            // three collapse into one type without losing anything. smalldatetime and time keep their own:
-            // the first rounds to the minute, and the second has no date part for a datetime2 to invent.
-            case "DATETIME" or "DATETIME2" or "DATE":
+            // datetime2 is a superset of datetime's range, so those two collapse without losing anything.
+            // date does NOT join them: it is its own SqlDbType, and sending a datetime2 for it makes the
+            // server convert on every call - harmless for the value, needless for a type that exists.
+            case "DATETIME" or "DATETIME2":
                 p.SqlDbType = SqlDbType.DateTime2;
+                ApplyFractionalSecondsScale(p, spec, firstArgument);
+                break;
+            case "DATE":
+                p.SqlDbType = SqlDbType.Date;
                 break;
             case "SMALLDATETIME":
                 p.SqlDbType = SqlDbType.SmallDateTime;
                 break;
             case "TIME":
                 p.SqlDbType = SqlDbType.Time;
+                ApplyFractionalSecondsScale(p, spec, firstArgument);
                 break;
 
             case "UNIQUEIDENTIFIER":

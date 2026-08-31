@@ -317,13 +317,23 @@ public class ProcedureHeaderParserTests
         {
             Assert.Null(p[i].Length);
             Assert.Null(p[i].Precision);
-            Assert.Null(p[i].Scale);
         }
 
+        // float(24) keeps nothing: every FLOAT binds as SqlDbType.Float, so the mantissa digits have
+        // nowhere in the contract to go.
         Assert.Equal("float", p[3].TypeName);
+        Assert.Null(p[3].Scale);
+
+        // The fractional-seconds types keep their digits as a scale. It reaches SqlParameter.Scale, so
+        // the parameter is bound with the precision the procedure declares rather than SqlClient's
+        // default of 7 - and it gives StoredProcedureValidator a scale to compare against the catalog,
+        // which it skips entirely while the contract states none.
         Assert.Equal("datetime2", p[4].TypeName);
+        Assert.Equal((byte)7, p[4].Scale);
         Assert.Equal("time", p[5].TypeName);
+        Assert.Equal((byte)3, p[5].Scale);
         Assert.Equal("datetimeoffset", p[6].TypeName);
+        Assert.Equal((byte)7, p[6].Scale);
     }
 
     [Fact]
