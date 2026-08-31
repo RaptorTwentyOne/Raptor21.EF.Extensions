@@ -1,7 +1,7 @@
 using System.Reflection;
 using System.Text;
 
-namespace Raptor21.EF.Extensions.StoredProcedures.Tests;
+namespace Raptor21.EF.Extensions.Migrations.Tests;
 
 /// <summary>
 /// An <see cref="Assembly"/> whose manifest resources are supplied in memory, so resource discovery can
@@ -41,8 +41,9 @@ internal sealed class FakeResourceAssembly : Assembly
     }
 
     /// <summary>
-    /// Names come back in the order they were added, because one test turns on which of two names that
-    /// collide after prefix-stripping was yielded last.
+    /// Names come back in the order they were added, because one test turns on which of two resources
+    /// declaring the same procedure was yielded first - that is the one the collision message must name
+    /// as the incumbent.
     /// </summary>
     public override string[] GetManifestResourceNames() => _resources.Select(r => r.Name).ToArray();
 

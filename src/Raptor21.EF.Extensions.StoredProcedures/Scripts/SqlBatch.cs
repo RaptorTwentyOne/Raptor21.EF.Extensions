@@ -3,12 +3,13 @@ using System.Text;
 namespace Raptor21.EF.Extensions.StoredProcedures.Scripts;
 
 /// <summary>
-/// The one place this library decides what a <c>GO</c> batch separator is. Both readers go through here:
-/// the runtime applier, which splits a script into the batches it sends, and the migration side, which
-/// only needs to know whether a script contains a separator at all. They disagreed once - a regex matching
-/// <c>^\s*GO\s*$</c> anywhere in the text rejected scripts the applier handled correctly - and a script
-/// that one half accepts and the other refuses is the worst failure this library can have, because it
-/// appears at deployment time on a file that built cleanly.
+/// The one place this library decides what a <c>GO</c> batch separator is. One scanner answers both
+/// questions that can be asked of a script: whether it contains a separator at all, which is what the
+/// migration side gates on, and where the separators fall, which is what <see cref="Split"/> returns for
+/// a consumer reading <c>.sql</c> of its own. Two readers of that rule disagreed once - a regex matching
+/// <c>^\s*GO\s*$</c> anywhere in the text rejected scripts a character-aware scanner handled correctly -
+/// and a script that one half accepts and the other refuses is the worst failure this library can have,
+/// because it appears at deployment time on a file that built cleanly.
 /// </summary>
 public static class SqlBatch
 {
@@ -26,8 +27,8 @@ public static class SqlBatch
         foreach (var raw in sql.Split('\n'))
         {
             // Only the '\r' that splitting on '\n' orphaned comes off. Any other trailing whitespace can
-            // sit inside a multi-line string literal, and it is part of what the history table hashed, so
-            // trimming it would leave a checksum recorded for text that was never sent.
+            // sit inside a multi-line string literal, where it is part of the value, so trimming it
+            // would change what the batch means.
             var line = raw.TrimEnd('\r', '\n');
 
             if (IsSeparator(line, state))
@@ -58,7 +59,8 @@ public static class SqlBatch
 
     /// <summary>
     /// Reports whether the script contains a real <c>GO</c> batch separator. A <c>GO</c> inside a string
-    /// literal, a bracketed identifier or a block comment is content, not a separator.
+    /// literal, a bracketed identifier, a <c>"..."</c> construct or a block comment is content, not a
+    /// separator.
     /// </summary>
     public static bool ContainsSeparator(string sql)
     {
@@ -79,9 +81,9 @@ public static class SqlBatch
     }
 
     // A GO separates only where the lines before it left the scanner at statement level: inside a literal,
-    // a bracketed identifier or a block comment it is content, and cutting there hands the server two
-    // fragments neither of which parses. The comparison reads a trimmed view rather than trimming the line
-    // itself, because that same line is what gets appended and has to keep its indentation.
+    // a bracketed identifier, a "..." construct or a block comment it is content, and cutting there hands
+    // the server two fragments neither of which parses. The comparison reads a trimmed view rather than
+    // trimming the line itself, because that same line is what gets appended and has to keep its indentation.
     private static bool IsSeparator(string line, in SqlScanState state) =>
         state.AtStatementLevel && line.AsSpan().Trim().Equals("GO", StringComparison.OrdinalIgnoreCase);
 
@@ -91,7 +93,7 @@ public static class SqlBatch
         buffer.Clear();
 
         // A buffer holding nothing but whitespace - the blank line left after a trailing GO, a file of
-        // blank lines - is dropped rather than emitted, so the applier never sends an empty command.
+        // blank lines - is dropped rather than emitted, so a caller never gets an empty command to send.
         if (!string.IsNullOrWhiteSpace(batch))
             batches.Add(batch);
     }
@@ -105,11 +107,21 @@ public static class SqlBatch
         public bool InStringLiteral;
         public bool InBracketedIdentifier;
 
+        /// <summary>
+        /// A "..." construct, whatever it currently means. Under QUOTED_IDENTIFIER ON - SqlClient's
+        /// default - it is a delimited identifier; with it OFF it is a string literal. One flag covers
+        /// both because the two readings agree on everything this scanner needs: the contents are not
+        /// statement text, "" is the escape, and the construct outlives a line break. Which of the two a
+        /// given script means cannot be known here anyway, since SET QUOTED_IDENTIFIER can be issued in
+        /// a batch this scanner has already handed on.
+        /// </summary>
+        public bool InDoubleQuotedConstruct;
+
         /// <summary>Block comments nest in T-SQL, so an inner /* has to be counted rather than ignored.</summary>
         public int BlockCommentDepth;
 
         public readonly bool AtStatementLevel =>
-            !InStringLiteral && !InBracketedIdentifier && BlockCommentDepth == 0;
+            !InStringLiteral && !InBracketedIdentifier && !InDoubleQuotedConstruct && BlockCommentDepth == 0;
     }
 
     /// <summary>
@@ -149,6 +161,18 @@ public static class SqlBatch
                 else
                     state.InBracketedIdentifier = false;
             }
+            else if (state.InDoubleQuotedConstruct)
+            {
+                if (c != '"')
+                    continue;
+
+                // "" escapes a literal " inside the construct, under both readings of it, mirroring ''
+                // inside a string and ]] inside brackets.
+                if (next == '"')
+                    i++;
+                else
+                    state.InDoubleQuotedConstruct = false;
+            }
             else if (state.BlockCommentDepth > 0)
             {
                 if (c == '/' && next == '*')
@@ -179,6 +203,16 @@ public static class SqlBatch
             else if (c == '[')
             {
                 state.InBracketedIdentifier = true;
+            }
+            else if (c == '"')
+            {
+                // Opening this state is what stops a GO inside a multi-line "..." from cutting the
+                // construct in half, and equally what stops an apostrophe or a '[' written inside one
+                // from opening a state that never closes and swallowing a real GO further down the file.
+                // The second failure is the more damaging of the two: a swallowed separator merges two
+                // batches, which is exactly how CREATE OR ALTER PROCEDURE stops being the first
+                // statement in its batch.
+                state.InDoubleQuotedConstruct = true;
             }
         }
     }

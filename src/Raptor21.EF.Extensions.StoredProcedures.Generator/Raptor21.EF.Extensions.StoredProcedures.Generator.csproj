@@ -16,8 +16,19 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
+  <!-- NOT a dependency version, and not to be bumped with the rest of the tree: this line is the
+       oldest compiler that can load the shipped analyzer. A compiler older than the Roslyn this
+       is built against refuses the assembly with CS9057 - a WARNING - and then every contract, row
+       materialiser and registry the generator writes is simply absent, so the consumer's build fails
+       on missing types and partial methods with no implementation, in their own files, mentioning no
+       analyzer. Reproduced: built against 5.9.0 the sample fails on SDK 10.0.100 with CS9057 plus a
+       dozen CS0234/CS8795; against 5.0.0 the same SDK builds clean. 5.0.0 is the Roslyn in the first
+       .NET 10 SDK, and the library targets net10.0 alone, so this floor covers every SDK that can
+       build a consumer at all. Raise it only to reach an API the generator actually needs, and only
+       by deciding which consumers to drop. Generator.Tests tracks the newest Roslyn on purpose -
+       it is not shipped - which also means the test suite cannot notice a regression here. -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" PrivateAssets="all" />
   </ItemGroup>
 
   <!-- Every type in this project is internal, including ProcedureHeaderParser and the four models it

@@ -9,8 +9,8 @@ surface is not a compatibility commitment.
 
 ### Added
 
-- `Raptor21.EF.Extensions.StoredProcedures` — the runtime: contracts, a contract-driven executor, a
-  live-schema validator and an idempotent embedded-script applier. Targets `net10.0`, marked
+- `Raptor21.EF.Extensions.StoredProcedures` — the runtime: contracts, a contract-driven executor and a
+  live-schema validator. Nothing in it deploys; deployment is EF's migration. Targets `net10.0`, marked
   `IsTrimmable` and `IsAotCompatible`; the trim and AOT analyzers report nothing on it.
 - The Roslyn source generator, shipped **inside** that package under `analyzers/dotnet/cs`. One
   `PackageReference` gives a consumer both halves, and there is no way to pair a runtime with a
@@ -25,15 +25,15 @@ surface is not a compatibility commitment.
   nuget.org trusted publishing (OIDC).
 
 
-- `tests/Raptor21.EF.Extensions.StoredProcedures.Tests` — 253 tests over the runtime library, none of
-  which needs a SQL Server, a network or the file system. Twelve pure statics now sit behind the
-  library's `InternalsVisibleTo` to make that possible: ten widened from `private`, and two
-  lifted out of loops that had been written inline. No existing public signature was widened to serve a
-  test, and the trim and AOT analyzers still report nothing. The `GO` split is not among the twelve —
-  it had a second caller in a second assembly, so it left the applier for the public `SqlBatch` below
-  rather than becoming an internal the migration package could not have called.
-- `SqlBatch` — the one public reader of `GO` in this library, used by both the runtime applier and the
-  migration parser.
+- 512 tests across the three suites — 285 over the runtime library, 48 over the migration package, 179
+  over the generator — and not one needs a SQL Server, a network or the file system. Ten pure statics
+  sit behind the runtime library's `InternalsVisibleTo` to make that possible: eight widened from
+  `private`, and two lifted out of loops that had been written inline. No existing public signature was
+  widened to serve a test, and the trim and AOT analyzers still report nothing. The `GO` split is
+  deliberately not among the ten — the migration package reads `GO` too, and an internal is a thing that
+  package could not have called, so it is the public `SqlBatch` instead.
+- `SqlBatch` — the one public reader of `GO` in this library, used by the migration parser and by
+  anything a consumer writes against it.
 - **Parameter facts now come from the procedure's own `.sql`, which makes `[Sql]` optional.** The
   generator parses the `CREATE`/`ALTER PROCEDURE` header of every script that reaches the compiler and
   fills in each parameter's SQL name, type, length, precision, scale and OUTPUT direction from the
@@ -67,8 +67,9 @@ surface is not a compatibility commitment.
 - `.sql` scripts reach the compiler on their own in any project that references the package, which now
   ships `buildTransitive/Raptor21.EF.Extensions.StoredProcedures.targets`. It lists every
   `EmbeddedResource` whose extension is `.sql` a second time as an `AdditionalFiles` item. The two
-  channels are not interchangeable and neither can serve the other: `EmbeddedResource` is the run-time
-  channel that carries the bytes inside the assembly for the applier, and `AdditionalFiles` is the only
+  channels are not interchangeable and neither can serve the other: `EmbeddedResource` is what carries
+  the bytes inside the assembly, which is where `RegisterStoredProcedures` reads them at model-building
+  time to put each procedure into the migration, and `AdditionalFiles` is the only
   channel Roslyn gives an analyzer for file content — at generation time the assembly does not exist, and
   reading the disk is not an option because RS1035 makes `System.IO.File` a compile error in a generator
   project. Listing the file twice costs the output nothing: an `/additionalfile:` entry produces no
@@ -256,10 +257,87 @@ surface is not a compatibility commitment.
   live on the developer's own declaring part — so a consumer building with `GenerateDocumentationFile`
   and no CS1591 suppression was collecting one warning per group class in a file they cannot edit.
 
+### Removed
+
+- **`EmbeddedScriptApplier` and `StoredProcedureSchemaManager` are gone, and with them
+  `dbo.__DbScriptHistory`.** The library shipped two ways to get a procedure into a database: an EF
+  migration, and a runtime applier that scanned embedded `.sql` resources at boot, split them on `GO`,
+  hashed each one and recorded it in a history table of its own. The applier came in with the extraction
+  from the original repository — `docs/AUDIT-AND-ROADMAP.md` lists it as inherited — and predates the
+  ruling that this is a code-first EF library. Nothing forced the two to meet, so it survived.
+
+  Two deployment mechanisms over one set of files is one too many. They kept separate books —
+  `__EFMigrationsHistory` against `__DbScriptHistory` — and neither could read the other's, so a
+  procedure could be applied by both, and the two could disagree about what was deployed with nothing in
+  either to notice. The applier also opened its own connection from its own connection string, which is
+  why it could never join a caller's transaction.
+
+  The proximate reason is smaller and sharper. The round before this one fixed the applier's apply order,
+  which was `Assembly.GetManifestResourceNames()` order — unspecified, and collapsing to hash order once
+  six script names share a length. The fix was to invent a deployment ordering rule: sort by script name,
+  ordinal and case-insensitive, with "zero-pad your numbers or `10_x` runs before `9_x`" written into the
+  public doc comment. Migrations already solve that problem with an ordered, named, recorded list.
+  Writing a second, weaker answer to a question EF had answered is what made the duplication visible.
+
+  What replaces it: nothing, deliberately. `dotnet ef migrations add` carries procedures already, because
+  `RegisterStoredProcedures` puts every `.sql` on the model and `StoredProcedureModelDiffer` diffs them.
+  What survives untouched is the half that reads rather than writes —
+  `StoredProcedureValidator.ValidateAsync`, which compares each generated contract to `sys.parameters`
+  and the described first result set and throws at boot on a mismatch. It was the useful half of
+  `ApplyAndValidateAsync` and it is now called directly; the sample's step 2 shows it. `SqlBatch` also
+  survives: the migration parser is a caller, so the `GO` reader was never the applier's.
+
+  What a consumer feels: `EmbeddedScriptApplier.ApplyEmbeddedScriptsAsync` and
+  `StoredProcedureSchemaManager.ApplyAndValidateAsync` no longer exist. Replace the latter with
+  `StoredProcedureValidator.ValidateAsync(connectionString, contracts, ct)` and let the migration deploy.
+  A database that carries a `dbo.__DbScriptHistory` table from an earlier version is not read, not
+  written and not dropped — it is inert, and dropping it is a decision for whoever owns that database,
+  since its rows are the only record of what the old path applied.
+- The `decimal` scale-truncation gap, and the apply-order gap that replaced it in the previous round.
+  Both are settled below rather than open: the first was withdrawn on evidence, the second no longer has
+  a mechanism to be about.
+
 ### Fixed
 
+- The shipped analyzer loads on every .NET 10 SDK again. Its `Microsoft.CodeAnalysis.CSharp` reference
+  had moved to the newest release with the rest of the tree, and that line is not a dependency version —
+  it is the oldest compiler that can load the generator. A compiler older than the Roslyn it was built
+  against refuses the assembly with CS9057, which is a *warning*; every contract, row materialiser and
+  registry the generator writes is then absent, and the build fails on missing types and partial methods
+  with no implementation, in the consumer's own files, naming no analyzer. Reproduced rather than
+  reasoned about: the sample built against Roslyn 5.9 fails on SDK 10.0.100 with CS9057 and a dozen
+  CS0234/CS8795, and builds clean against 5.0.0 on the same SDK. Pinned to 5.0.0, the Roslyn in the first
+  .NET 10 SDK — the library targets `net10.0` alone, so that floor covers every SDK that can build a
+  consumer. CI would never have caught it: both workflows use `dotnet-version: 10.0.x`, which resolves to
+  the newest patch.
+- Every other package moved to its current release: EF Core 10.0.11 across the shipping migration package,
+  the sample and the tests; `Microsoft.NET.Test.Sdk` 18.9.0 and `xunit.runner.visualstudio` 4.0.0 in the
+  three test projects; Roslyn 5.9.0 in the generator's own test project, which is not shipped and is
+  deliberately ahead of the floor above.
+- `RegisterStoredProcedures` refuses two embedded scripts that declare the same procedure, naming both
+  files, instead of letting the second silently overwrite the first. The annotation key is the parsed
+  qualified name and not the file name, so `010_Upsert.sql` and `020_Upsert_v2.sql` both declaring
+  `dbo.usp_Upsert` used to leave one of them in no migration at all — a file plainly in the repository,
+  plainly an `EmbeddedResource`, and simply absent, surfacing far away as a procedure that never changes
+  no matter how it is edited. `usp_X` and `dbo.usp_X` collide too, since an unqualified name is `dbo`.
+  The guard came from the removed applier, which had it; this is now the library's only loader, so
+  nothing else was going to catch it.
 - `GO` inside a string literal, a bracketed identifier or a nested block comment is no longer treated as
   a batch separator, and an indented `GO` now is one. Both readers agree by construction.
+- `GO` inside a `"..."` construct is content too, and the fix runs in both directions. A `"..."` is a
+  delimited identifier under `QUOTED_IDENTIFIER ON` — SqlClient's default — and a string literal with it
+  off; the scanner cannot know which, since the setting can be changed by a batch it has already handed
+  on, and it does not need to, because under both readings the contents are not statement text and `""`
+  is the escape. The direction the known-gaps entry described was the milder one: a line reading `GO`
+  inside a multi-line `"..."` used to cut the construct in half. The direction it missed is worse — an
+  apostrophe, a `[` or a `/*` written inside a `"..."` used to open a construct that never closed, and
+  the next genuine `GO` was then swallowed and two batches merged into one, which is exactly how
+  `CREATE OR ALTER PROCEDURE` stops being the first statement in its batch. On the migration side the
+  same miss let `ParseQualifiedName` accept a multi-batch script it exists to refuse. What a consumer
+  feels, and it is a visible break: a script containing a legal `"it's"` or `"a[b"` followed by a real
+  `GO` used to register and now throws "contains a 'GO' batch separator" at registration, trading a
+  deployment-time failure for a build-time one; and the same script is now sent to the server as two
+  batches where it used to arrive merged.
 - Leading blank lines of a batch survive, so SQL Server's reported line numbers match the `.sql` source.
 - A resource whose stream comes back null is reported by name instead of as
   `ArgumentNullException("stream")`.
@@ -298,7 +376,11 @@ surface is not a compatibility commitment.
 
 Most are carried over from the audit that preceded this extraction; the ones this release introduced
 are marked NEW. Two of those are the price of wrapping a procedure in `EXEC(N'...')` so that idempotent
-scripts parse at all, and both are stated with the paths they do and do not affect.
+scripts parse at all, and both are stated with the paths they do and do not affect. One entry is marked
+WITHDRAWN: it was taken up as a defect, driven, and found not to be one. It stays on the list, rewritten,
+because a claim this list makes and nobody re-checks is how a list like this stops being read at all —
+and because the withdrawn one told consumers to write explicit scales into their contracts to prevent a
+truncation that does not happen.
 
 - NEW, and a consequence of the `EXEC(N'...')` wrap: `migrations script --idempotent` indents every
   line of a command by four spaces, and because the procedure body now lives inside the literal, that
@@ -307,7 +389,7 @@ scripts parse at all, and both are stated with the paths they do and do not affe
   to the drift check that is still on the list, and shifts the line numbers in a runtime error by the
   indent. `dotnet ef database update` is unaffected; only the generated script indents.
 - NEW, same cause: a procedure body may legally contain a line reading `GO` inside a string literal —
-  `SqlBatch` correctly treats it as content, and the runtime applier runs it. In a generated script
+  `SqlBatch` correctly treats it as content, and `database update` runs it. In a generated script
   that line ends up inside the `EXEC(N'...')` literal, and `sqlcmd`'s batch scanner is line-based and
   does not know it is inside a literal, so it cuts there and the deployment fails with a syntax error.
   Loud rather than silent, and only on the `sqlcmd` path — `database update` and SSMS are unaffected.
@@ -315,10 +397,46 @@ scripts parse at all, and both are stated with the paths they do and do not affe
   other path, and re-splits the `GO` rule that this release just unified.
 - Only stored procedures are first-class. Functions, views, triggers, table types and sequences have no
   contract, no validator and no migration support.
-- `decimal` declared without an explicit scale still defaults the scale to 0, so a contract that omits
-  it truncates.
-- Scripts are applied in `FrozenDictionary` enumeration order, which is unspecified and can differ
-  between two runs of the same binary.
+- WITHDRAWN, and left here because a wrong entry is worth correcting in public: `decimal` declared
+  without an explicit scale was said to default the scale to 0 and truncate. It does not. A zero scale is
+  never put on the wire — SqlClient serialises a parameter's scale only when it is non-zero — so a
+  contract that omits the scale and a contract that states an explicit `0` both send the value's own
+  scale, exactly as an untouched `SqlParameter` does; `ApplySqlType`'s `spec.Scale ?? 0` is inert in the
+  zero case rather than lossy. What does round a value is SQL Server's own rule at the server: a
+  procedure declaring a bare `decimal` parameter has declared `decimal(18,0)`, and the value is rounded
+  on assignment to it. That is the procedure's declaration to fix, and the generator now reads the scale
+  out of the header when the `.sql` reaches the compiler. Driven against Microsoft.Data.SqlClient 7.0.2,
+  whose `ShouldSerializeScale` is `_scale != 0` on both its branches; a future provider that honoured an
+  explicit zero would make that `?? 0` live, which is the one thing worth watching here.
+- The precision half of the same story is real, and it fails in the opposite direction from the entry
+  above. A contract stating no precision is given 18 by `ApplySqlType`, and unlike a zero scale a
+  non-zero precision IS transmitted — so a value needing more than 18 digits is refused by the provider
+  before it reaches a procedure declared `decimal(38,4)` that could have held it. The neighbouring
+  datetime branch already takes the other decision: `ApplyFractionalSecondsScale` sets a scale only when
+  the contract states one, on the ground that saying nothing is the correct answer rather than a gap.
+  Leaving the precision unstated would change what the server is told for every undecorated `decimal`
+  parameter of every consumer, which is why it is written down rather than changed quietly, and pinned by
+  a test that contrasts the mapped parameter with an untouched one.
+- A contract that states a precision and no scale is emitted with `(byte)0` for the scale, and
+  `StoredProcedureValidator` compares a scale it is given: such a contract fails startup validation
+  against a `decimal(18,2)` procedure with "scale mismatch. Expected 0, found 2" — while, per the first
+  entry above, it would have bound the value correctly had it been allowed to run. Only reachable with
+  `R21SqlScriptDiscovery=false` or with no script in the compilation; with the `.sql` present the merge
+  fills the scale from the header. `SqlTypeSpec.Scale` is `byte?`, so emitting `null` there is
+  expressible and would leave wire behaviour byte-identical while removing the false failure — but it
+  changes the generator's emitted text for that one spelling, which is precisely the byte-identity
+  guarantee `RenderSqlType` was written to protect, so it is the owner's call rather than an obvious fix.
+- Script order is deterministic now, not correct. Nothing reads a script to discover that it needs
+  another, so the order comes from the names and is only as good as the naming: the comparison is
+  lexicographic rather than numeric, so an unpadded `10_x.sql` is applied before `9_x.sql`, and a corpus
+  whose intended order disagrees with its alphabet — one whose author ran `RollupSessions` before
+  `RollupDaily` — is now reliably applied the other way instead of unreliably applied either way.
+  Encoding a dependency in the file names stays the consumer's job.
+- The batch scanner still refuses `GO 5`, `GO;` and `GO -- done` as separators, though `sqlcmd` accepts
+  all three, and it splits on `\n` alone, so a classic-Mac file with `\r` line endings is one enormous
+  batch. Both are pinned by tests as decisions rather than reported here as bugs, because both halves of
+  the library are blind in the identical way and a file is therefore never accepted by one and cut by the
+  other; changing either is a product decision.
 - Whether the generator reaches a project that gets this package only transitively is the SDK's
   behaviour, not ours, and it is not what the packaging suggests. The `Migrations` package records the
   dependency with `exclude="Build,Analyzers"`, yet on SDK 10.0.400 a three-package chain measured here
@@ -329,10 +447,10 @@ scripts parse at all, and both are stated with the paths they do and do not affe
   stops: `buildTransitive` targets travel where analyzers might not, so a downstream project could end
   up handing its `.sql` `EmbeddedResource` items to a generator that is not there. That is the reason
   to name this package directly rather than to reason about what NuGet will do.
-- Borrowing closes the gap for generated CALLS and not for apply/validate. `StoredProcedureValidator`,
-  `EmbeddedScriptApplier` and `StoredProcedureSchemaManager` still take a connection string and open a
-  connection of their own, so they cannot run inside a caller's transaction. "The library is
-  transaction-aware now" is half true.
+- Borrowing closes the gap for generated CALLS and not for validation. `StoredProcedureValidator` still
+  takes a connection string and opens a connection of its own, so it cannot run inside a caller's
+  transaction. "The library is transaction-aware now" is half true. Smaller than it was: the two other
+  types this entry used to name deployed, and they are gone.
 - `cmd.Transaction = lease.Transaction` with a NON-null transaction cannot be unit-tested: `SqlTransaction`
   has no public constructor and cannot be obtained without a server. The offline suite proves the null
   case only; the borrowing path itself is proved by the sample's rollback step, which needs
@@ -345,6 +463,4 @@ scripts parse at all, and both are stated with the paths they do and do not affe
   handle twice. The generated body uses a single `await using` and cannot; a hand-written release handle
   should be idempotent anyway, because one close too many on a borrowed connection ends the caller's
   transaction and the failure surfaces nowhere near its cause.
-- The batch scanner tracks `'`, `[ ]`, `/* */` and `--`, but not double quotes, so a `GO` inside a
-  multi-line `"..."` construct still splits the batch.
 - No drift detection against `sys.sql_modules`: a procedure altered in the database by hand is invisible.

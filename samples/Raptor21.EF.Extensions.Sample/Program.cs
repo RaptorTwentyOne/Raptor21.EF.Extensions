@@ -3,8 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using Raptor21.EF.Extensions.Sample.Catalog;
 using Raptor21.EF.Extensions.Sample.Data;
 using Raptor21.EF.Extensions.Sample.Generated;
-using Raptor21.EF.Extensions.StoredProcedures;
 using Raptor21.EF.Extensions.StoredProcedures.Execution;
+using Raptor21.EF.Extensions.StoredProcedures.Validation;
 
 var connectionString = CatalogDbContextFactory.ConnectionString;
 Console.WriteLine($"Database: {connectionString}");
@@ -18,15 +18,11 @@ await using (var db = new CatalogDbContext(CatalogDbContextFactory.BuildOptions(
     Console.WriteLine("Migrations applied (tables + procedures).");
 }
 
-// 2. Belt and braces for apps that do not migrate at boot: apply the scripts idempotently, then check
-//    every generated contract against the live database. A procedure someone edited by hand, a renamed
-//    parameter, a changed length - all of it fails here rather than on the first call in production.
-await StoredProcedureSchemaManager.ApplyAndValidateAsync(
-    connectionString,
-    typeof(Program).Assembly,
-    CatalogDbContext.ScriptResourcePrefix + ".",
-    GeneratedProcedureRegistry.All,
-    useTransaction: true);
+// 2. Check every generated contract against the live database. Nothing is deployed here - step 1 is the
+//    only thing in this program that writes to the schema, and it is EF's migration. This step reads:
+//    a procedure someone edited by hand, a renamed parameter, a changed length all fail here rather than
+//    on the first call in production.
+await StoredProcedureValidator.ValidateAsync(connectionString, GeneratedProcedureRegistry.All);
 Console.WriteLine($"Validated {GeneratedProcedureRegistry.All.Count} contracts against the live schema.");
 
 // 3. Call the procedures. Nothing below uses reflection, so this sample publishes AOT.

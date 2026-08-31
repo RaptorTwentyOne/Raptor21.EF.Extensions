@@ -301,7 +301,7 @@ public class StoredProcedureExecutorCommandTests
         // EXPECTED TO FAIL. Defect: StoredProcedureExecutor has no argument guards at all — not one
         // ArgumentNullException.ThrowIfNull anywhere in the file — so a null contract surfaces as a
         // NullReferenceException at `contract.Parameters` naming neither the argument nor the procedure.
-        // StoredProcedureValidator and StoredProcedureSchemaManager both guard their arguments, so the
+        // StoredProcedureValidator guards its arguments, so the
         // library is inconsistent with itself rather than deliberately unguarded.
         var ex = Assert.Throws<ArgumentNullException>(() => StoredProcedureExecutor.BuildCommand(
             SqlConnectionLease.Own(new SqlConnection()),

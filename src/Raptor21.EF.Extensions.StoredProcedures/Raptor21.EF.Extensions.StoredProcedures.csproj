@@ -26,14 +26,13 @@
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
   </ItemGroup>
 
-  <!-- The library's only InternalsVisibleTo. Twelve pure, I/O-free statics hold the SQL-type mapping
-       table, the parameter binding, the row materialiser and the type-compatibility matrix; every
-       public door in front of them opens a SqlConnection before the logic runs, so testing them offline
-       is otherwise impossible and the alternative - making them public - would widen a shipped API to
-       serve tests. The GO batch split is deliberately not among them: it needed a second caller in a
-       second assembly, so it left the applier for the public SqlBatch type rather than becoming an
-       internal the migration package could not have called. Compile-time only: no reflection, no
-       runtime cost, no effect on the trimming and AOT claims above. -->
+  <!-- The library's only InternalsVisibleTo. Ten pure, I/O-free statics hold the SQL-type mapping table,
+       the parameter binding, the row materialiser and the type-compatibility matrix; every public door in
+       front of them opens a SqlConnection before the logic runs, so testing them offline is otherwise
+       impossible and the alternative - making them public - would widen a shipped API to serve tests. The
+       GO batch split is deliberately NOT among them: the migration package reads GO too, and an internal
+       is a thing that package could not have called, so it is the public SqlBatch instead. Compile-time
+       only: no reflection, no runtime cost, no effect on the trimming and AOT claims above. -->
   <ItemGroup>
     <InternalsVisibleTo Include="Raptor21.EF.Extensions.StoredProcedures.Tests" />
   </ItemGroup>

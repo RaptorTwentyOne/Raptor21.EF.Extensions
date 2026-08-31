@@ -24,8 +24,8 @@ public static partial class StoredProcedureScript
             throw new InvalidOperationException($"Stored procedure script '{scriptName}' is empty.");
 
         // SqlBatch is the single reader of GO in this library. A regex over the whole text used to
-        // stand here, and it saw a GO inside a string literal or a block comment as a separator,
-        // rejecting scripts the runtime applier splits correctly.
+        // stand here, and it saw a GO inside a string literal, a bracketed identifier, a "..." construct
+        // or a block comment as a separator, rejecting scripts that are one perfectly ordinary batch.
         if (SqlBatch.ContainsSeparator(sql))
             throw new InvalidOperationException(
                 $"Stored procedure script '{scriptName}' contains a 'GO' batch separator. Each procedure must be a single CREATE OR ALTER PROCEDURE batch (no GO).");

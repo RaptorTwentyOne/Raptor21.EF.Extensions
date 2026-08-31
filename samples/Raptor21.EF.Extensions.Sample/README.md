@@ -7,7 +7,7 @@ A console app that shows the whole loop this library exists for.
 | `Data/Product.cs`, `Data/CatalogDbContext.cs` | Tables the ordinary EF way, plus one `RegisterStoredProcedures` call that puts the `.sql` files on the model |
 | `Data/ProductListResult.cs` | A keyless entity — a result shape rather than a table, declared with `HasNoKey().ToView(...)`, which is what a row type binds to |
 | `Data/CatalogDbContextFactory.cs` | The differ replacement, shared by `dotnet ef` and the app — design time and run time must agree or migrations quietly lose the procedures |
-| `DbScripts/*.sql` | The procedure bodies. Source of truth, embedded in the assembly, read by both the migration and the startup applier |
+| `DbScripts/*.sql` | The procedure bodies. Source of truth, embedded in the assembly, read by the migration and by the generator |
 | `Catalog/CatalogProcedures.cs` | Five declarations, no bodies: RETURN value + OUTPUT parameter, result set, result set + RETURN, model-bound result set, and plain non-query |
 | `Catalog/ProductRow.cs` | A hand-written positional `[SqlRow]` record; the generator writes its `FromDataRecord` |
 | `Catalog/ProductListRow.cs` | `[SqlRow(Entity = typeof(ProductListResult))]` — the members come from the model, so the generator writes the primary constructor too |

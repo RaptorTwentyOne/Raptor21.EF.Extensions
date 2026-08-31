@@ -15,9 +15,10 @@ namespace Raptor21.EF.Extensions.StoredProcedures.Tests;
 /// <remarks>
 /// The subject is pure — a freshly constructed <see cref="SqlParameter"/>, no connection, no I/O — but
 /// until the executor's helpers became internal it was reachable only through a live server, so none of
-/// these fourteen branches had ever been executed by a test. Several of the tests below assert the
-/// CORRECT mapping rather than the current one and therefore fail against today's library; each says so
-/// and names the defect. Weakening one of them to green would delete the finding.
+/// these branches had ever been executed by a test. Several were written red on purpose - asserting the
+/// CORRECT mapping rather than the one the library had - and the defects they named have since been
+/// fixed, so the file is green. Each of those still carries the note saying what it caught; weakening one
+/// to keep it green would delete the finding.
 /// </remarks>
 public class SqlTypeMappingTests
 {
@@ -121,6 +122,72 @@ public class SqlTypeMappingTests
         // 0 as authoritative — and therefore truncates 1.5 to 1 for a contract that omitted the scale —
         // is provider behaviour that cannot be established from this repository, so it is not asserted
         // here in either direction.
+    }
+
+    [Theory]
+    [InlineData("decimal(9,4)", 9, 4)]
+    [InlineData("numeric(38,10)", 38, 10)]
+    [InlineData("decimal(18)", 18, 0)]
+    [InlineData(" DECIMAL ( 12 , 3 ) ", 12, 3)]
+    public void ApplySqlType_Decimal_ReadsPrecisionAndScaleWrittenIntoTheTypeName(
+        string typeName,
+        int expectedPrecision,
+        int expectedScale)
+    {
+        // A hand-written [Sql("@Total", "decimal(9,4)")] is as legal as the same facts spelled into
+        // Precision and Scale, and a contract transcribed from a .sql header is written the first way.
+        // The last row is the reason ParseSqlTypeName exists at all: before it, some names matched with
+        // StartsWith and others with equality, so a decorated spelling could miss its own arm and bind as
+        // a varchar. "decimal(18)" is SQL Server's own reading of a bare decimal, precision without scale.
+        var p = Map(new SqlTypeSpec(typeName));
+
+        Assert.Equal(SqlDbType.Decimal, p.SqlDbType);
+        Assert.Equal(expectedPrecision, (int)p.Precision);
+        Assert.Equal(expectedScale, (int)p.Scale);
+    }
+
+    [Theory]
+    [InlineData("decimal(50,2)")]
+    [InlineData("decimal(0,2)")]
+    public void ApplySqlType_Decimal_PrecisionOutsideSqlServersRange_FallsBackToTheDeclaredDefault(string typeName)
+    {
+        // 38 is SQL Server's own ceiling and 0 is not a precision, so neither number is a precision this
+        // could pass on. Casting them to a byte instead would send 50 to a server that refuses it and
+        // turn a hypothetical decimal(300,2) into precision 44 — a silently wrong number rather than a
+        // refused one.
+        var p = Map(new SqlTypeSpec(typeName));
+
+        Assert.Equal(18, (int)p.Precision);
+        Assert.Equal(2, (int)p.Scale);
+    }
+
+    [Fact]
+    public void ApplySqlType_Decimal_WithNoPrecision_AnnouncesOneTheContractNeverStated()
+    {
+        // PINS A KNOWN GAP rather than endorsing it, and it is the gap the CHANGELOG entry about decimals
+        // used to describe from the wrong end. The scale half of that entry was wrong: SqlClient does not
+        // serialize a scale of 0 — a parameter carrying one sends the value's own scale, exactly as an
+        // untouched parameter does — so nothing here truncates a decimal by omitting the scale.
+        //
+        // A precision of 0 IS distinguishable from a stated one, and this branch states 18 where the
+        // contract stated nothing. That is the real residue and it fails in the opposite direction from
+        // the one that was written down: not a silent truncation but a refusal, because a value needing
+        // more than 18 digits is rejected by the provider before it reaches a procedure that may well be
+        // declared decimal(38,4) and able to hold it. The contrast below is the whole finding — the
+        // library announces a precision where SqlClient would have announced the value's own.
+        //
+        // The neighbouring datetime branch already takes the other decision: ApplyFractionalSecondsScale
+        // sets a scale only when the contract states one, on the ground that saying nothing is the
+        // correct answer rather than a gap. Whether decimal should follow it is a behaviour change for a
+        // published package to weigh, not something a test may decide, so this pins what is true today.
+        // Neither parameter carries a value, so what is compared is what each one states rather than
+        // anything a value implies — which is the whole distinction, since an unstated precision is what
+        // lets the value's own be used.
+        var mapped = Map(new SqlTypeSpec("decimal"));
+        var untouched = new SqlParameter { SqlDbType = SqlDbType.Decimal };
+
+        Assert.Equal(18, (int)mapped.Precision);
+        Assert.Equal(0, (int)untouched.Precision);
     }
 
     [Theory]

@@ -10,7 +10,7 @@ the gap this family closes.
 
 | Package | What it does |
 |---|---|
-| **`Raptor21.EF.Extensions.StoredProcedures`** | The runtime — contracts, a contract-driven executor, a live-schema validator and an idempotent script applier — plus the Roslyn source generator, which ships inside this package. |
+| **`Raptor21.EF.Extensions.StoredProcedures`** | The runtime — contracts, a contract-driven executor and a live-schema validator — plus the Roslyn source generator, which ships inside this package. |
 | **`Raptor21.EF.Extensions.Migrations`** | Registers those scripts on the EF model and diffs them, so `dotnet ef migrations add` emits `CREATE OR ALTER` / `DROP` alongside the table DDL. EF Core 10. |
 
 The runtime and the generator are separate projects on purpose: schema knowledge is resolved at compile
@@ -160,24 +160,25 @@ never disposed by this library; pass an `IAsyncDisposable` as `Borrow`'s third a
 itself had to open something, and the lease runs it exactly once. Nothing in the generated body branches
 on any of this, so registering the default provider keeps exactly the behaviour it has today.
 
-`StoredProcedureSchemaManager`, `ValidateAsync` and `ApplyEmbeddedScriptsAsync` are not part of this:
-they still take a connection string and open a connection of their own.
+`ValidateAsync` is not part of this: it still takes a connection string and opens a connection of its
+own.
 
-### Startup: apply scripts + validate contracts against the live DB
+### Startup: validate contracts against the live DB
 
 ```csharp
-await StoredProcedureSchemaManager.ApplyAndValidateAsync(
+await StoredProcedureValidator.ValidateAsync(
     connectionString,
-    typeof(Program).Assembly,
-    "MyApp.DbScripts.",                                   // embedded .sql resource prefix
     MyApp.Generated.GeneratedProcedureRegistry.All,       // generated; no manual list
-    useTransaction: true,
     ct);
 ```
 
 `ValidateAsync` compares each contract to the real procedure (`sys.parameters`,
 `sys.dm_exec_describe_first_result_set_for_object`) and throws on the first mismatch in
 parameter names/types/lengths or result-set columns. Fail fast at boot.
+
+It reads and never writes. **Nothing in this library deploys a procedure except an EF migration** — there
+is no second applier, no second history table and no way for a startup path and a migration to disagree
+about what is in the database. If validation fails, the answer is a migration, not a repair at boot.
 
 ---
 

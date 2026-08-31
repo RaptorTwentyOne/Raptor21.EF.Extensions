@@ -32,7 +32,7 @@ public class StoredProcedureScriptTests
     }
 
     // The two halves of this library used to disagree about GO, which is the worst shape a defect can
-    // take here: the runtime applier split this script correctly while a regex over the whole text
+    // take here: a character-aware scanner splits this script correctly while a regex over the whole text
     // rejected it outright, so a file that built cleanly failed at deployment. Both now call
     // SqlBatch, so a GO that is content rather than a separator is content on both sides.
     [Theory]
