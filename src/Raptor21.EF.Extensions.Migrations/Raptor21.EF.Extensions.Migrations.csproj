@@ -14,12 +14,18 @@
   <PropertyGroup Label="Package">
     <IsPackable>true</IsPackable>
     <PackageId>Raptor21.EF.Extensions.Migrations</PackageId>
-    <Description>Folds code-first database objects into EF Core migrations: registers scripts as model annotations and emits CREATE OR ALTER / DROP operations through a custom IMigrationsModelDiffer, so procedure changes travel in the same migration as table changes. Targets EF Core 10.</Description>
-    <PackageTags>efcore;migrations;sqlserver;stored-procedure;code-first;schema</PackageTags>
+    <Description>Folds code-first SQL Server database objects into EF Core migrations: stored procedures as CREATE OR ALTER / DROP operations, partition functions and schemes, tables created on a partition scheme, and clustered columnstore indexes — all declared on the model, carried by the snapshot and diffed by a custom IMigrationsModelDiffer, so they travel in the same migration as the table changes. Targets EF Core 10.</Description>
+    <PackageTags>efcore;migrations;sqlserver;stored-procedure;partitioning;columnstore;code-first;schema</PackageTags>
   </PropertyGroup>
 
+  <!-- The SQL Server provider rather than Relational alone, for one base class:
+       CodeFirstDatabaseObjectsMigrationsSqlGenerator extends SqlServerMigrationsSqlGenerator to write
+       CREATE TABLE ... ON [scheme]([column]), and there is no provider-neutral seam for a table's physical
+       placement. Every object this package emits — CREATE OR ALTER PROCEDURE, partition functions and
+       schemes, columnstore indexes — is SQL Server T-SQL already, so the dependency states what was
+       always true rather than narrowing anything. -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.11" />
   </ItemGroup>
 
   <!-- The runtime package, for one type: SqlBatch. This side used to have a GO reader of its own - a

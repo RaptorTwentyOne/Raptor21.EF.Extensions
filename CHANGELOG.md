@@ -25,7 +25,7 @@ surface is not a compatibility commitment.
   nuget.org trusted publishing (OIDC).
 
 
-- 512 tests across the three suites — 285 over the runtime library, 48 over the migration package, 179
+- 621 tests across the three suites — 285 over the runtime library, 157 over the migration package, 179
   over the generator — and not one needs a SQL Server, a network or the file system. Ten pure statics
   sit behind the runtime library's `InternalsVisibleTo` to make that possible: eight widened from
   `private`, and two lifted out of loops that had been written inline. No existing public signature was
@@ -175,6 +175,54 @@ surface is not a compatibility commitment.
   open with a matching close belongs on the consumer's side, which is why `Borrow` takes a release handle
   instead of knowing about `DbContext`.
 
+- **Partition functions, partition schemes, a table's placement on a scheme and clustered columnstore
+  indexes are code-first now**, in `Raptor21.EF.Extensions.Migrations`, and they ride the same rails the
+  procedures do: each is an annotation on the model, so it travels through the model snapshot, is diffed
+  against the snapshot by the differ, and lands in the migration next to the tables — in the order SQL Server
+  needs. `modelBuilder.HasPartitionFunction(name, sqlType, PartitionRange, boundaries)` and
+  `HasPartitionScheme(name, functionName, filegroup = "PRIMARY")` declare the objects;
+  `entity.OnPartitionScheme(scheme, e => e.Column)` places the table (`CREATE TABLE … ON [scheme]([column])`)
+  and `entity.HasClusteredColumnstoreIndex(name)` puts the index straight behind the `CREATE TABLE`, before
+  every nonclustered index, so those are built once over the columnstore. `PartitionBoundaries.Monthly` and
+  `PartitionBoundaries.Literal` spell boundaries in one stable form, because the differ compares them as
+  text: invariant numbers, `'yyyyMMdd'` for a date and ISO 8601 with `T` for a datetime — the two date
+  spellings every SQL Server date type reads as year-month-day under any session language, legacy `datetime`
+  included. Adding a boundary scaffolds an idempotent `SPLIT RANGE` with `NEXT USED` named first on every
+  scheme of the function — the model's and the snapshot's, because a scheme the same migration drops is
+  still bound when the split runs; removing one scaffolds a `MERGE RANGE`; the split and merge guards
+  convert the boundary literal, never `sys.partition_range_values.value`, whose rows may belong to a
+  function of another type entirely; every create and drop is guarded by `IF [NOT] EXISTS` against
+  `sys.partition_functions`, `sys.partition_schemes` and `sys.indexes`, so an idempotent script stays
+  idempotent. Columnstore drops run before EF's operations, because the direction that removes an index may
+  also re-create a clustered primary key, which SQL Server refuses while the columnstore stands; a
+  columnstore added to an existing table is created after them, or just before the first index the same
+  migration adds to that table, so that index is built once, over the columnstore.
+
+  The differ is `CodeFirstDatabaseObjectsModelDiffer`, and the `ON` clause needs a generator:
+  `CodeFirstDatabaseObjectsMigrationsSqlGenerator` extends the provider's own and appends the clause between
+  the unterminated `CREATE TABLE … (…)` and the terminator the provider would have written, comments and
+  idempotent wrapping included. `optionsBuilder.UseCodeFirstDatabaseObjects()` installs both. The differ
+  takes the registered `IMigrationsSqlGenerator` through its constructor and refuses a model that places a
+  table when that generator is not one that writes the clause — the alternative is a migration that creates
+  the table on the default filegroup, applies cleanly and never says so. Both entry points run the same
+  plan, so `has-pending-model-changes` and `migrations add` agree on the answer and on whether they throw.
+
+  What it refuses at `migrations add`, each with the fix in the message: a placement on an undeclared scheme;
+  a scheme on an undeclared function; a partition property that does not exist or maps to no column of the
+  table; a columnstore index next to a clustered key or index (`HasNoKey()`, or `HasKey(…).IsClustered(false)`);
+  a unique key or index on a partitioned table that leaves the partitioning column out, which SQL Server
+  requires of every unique index aligned to the scheme (error 1908 otherwise, at `database update`); and two
+  entity types sharing a table and disagreeing about its layout. What it refuses with a
+  `NotSupportedException` is listed under known gaps: the changes SQL Server itself cannot make in place.
+
+  The pure halves are public and tested without a database, like `StoredProcedureDiff`:
+  `PartitionDiff.Compute(PartitionLayout, PartitionLayout)` and
+  `ColumnstoreDiff.Compute(source, target)` over `PartitionFunctionDefinition`, `PartitionSchemeDefinition`
+  and `ClusteredColumnstoreIndexDefinition`; `PartitionLayout.FromModel(IModel)` reads the declarations off a
+  model, and the annotation keys live in `CodeFirstAnnotations`. The serialized forms are versioned
+  (`v1|datetime2(3)|RIGHT|'20260801','20260901'`, `v1|pf_EventsMonth|PRIMARY`) so a later format can be
+  read next to this one instead of invalidating every snapshot already checked in.
+
 ### Changed
 
 - Extracted from the KnightOnline repository, where this lived as `SqlServerStoredProcedureSchema`.
@@ -256,6 +304,24 @@ surface is not a compatibility commitment.
   CS1591, and the constructor is the one generated member that owes one — the partial methods' comments
   live on the developer's own declaring part — so a consumer building with `GenerateDocumentationFile`
   and no CS1591 suppression was collecting one warning per group class in a file they cannot edit.
+
+- `Raptor21.EF.Extensions.Migrations` now depends on `Microsoft.EntityFrameworkCore.SqlServer` rather than on
+  `Microsoft.EntityFrameworkCore.Relational` alone. There is one reason and it is structural: the `ON` clause
+  is written by a subclass of `SqlServerMigrationsSqlGenerator`, and there is no provider-neutral seam for a
+  table's physical placement. Nothing was narrowed by it — every statement the package emits was SQL Server
+  T-SQL before this change — and a consumer already references the provider, so the dependency states what
+  was true. The test project also takes `Microsoft.EntityFrameworkCore.Design`, test-only and with its
+  compile assets asked for explicitly, for the one assertion that runs EF's real snapshot generator.
+- `StoredProcedureModelDiffer` is a sealed, empty subclass of `CodeFirstDatabaseObjectsModelDiffer`, kept
+  under its old name so the `ReplaceService<IMigrationsModelDiffer, StoredProcedureModelDiffer>()` every
+  consumer has written keeps compiling and keeps working for a procedure-only model; it is not obsolete. Its
+  constructor gained an `IMigrationsSqlGenerator` parameter, which EF's service provider supplies — a
+  consumer constructing the differ by hand, which nothing documented, has one argument to add.
+- The `HasDifferences` rule from the previous round — our objects first in the OR, `base.HasDifferences`
+  never `this.GetDifferences`, one shared computation for both entry points — now covers the partition and
+  columnstore plan as well as procedures. The plan validates the target model and refuses a placement change,
+  so a base-first short circuit would have left the two entry points agreeing on every boolean and
+  disagreeing on whether they throw, exactly the defect the previous round closed for procedures.
 
 ### Removed
 
@@ -395,8 +461,40 @@ truncation that does not happen.
   Loud rather than silent, and only on the `sqlcmd` path — `database update` and SSMS are unaffected.
   Refusing such a body outright was tried and rejected: it removes a capability that works on every
   other path, and re-splits the `GO` rule that this release just unified.
-- Only stored procedures are first-class. Functions, views, triggers, table types and sequences have no
-  contract, no validator and no migration support.
+- Stored procedures, partition functions and schemes, table placement and clustered columnstore indexes are
+  the first-class object kinds. Functions, views, triggers, table types and sequences have no contract, no
+  validator and no migration support.
+- NEW, and stated as the limits of the partitioning support rather than as bugs, because each is a change SQL
+  Server cannot make in place and a scaffolded migration cannot judge the cost of: a partition function's
+  type or range direction, a scheme's function or filegroup, and an existing table's scheme or partitioning
+  column are fixed at creation. The differ throws `NotSupportedException` naming the object and the route —
+  move the tables off, drop and recreate, or rebuild the clustered index with `DROP_EXISTING = ON` onto the
+  new scheme — and the migration is yours to write. Declaring a new function or scheme under a new name is
+  always available and is what the differ handles.
+- NEW: `SPLIT RANGE` on a partition that already holds rows is refused by SQL Server for a table with a
+  columnstore index (error 35346) and is a full data movement for a rowstore one. The package scaffolds the
+  split it is asked for and cannot know what the partition holds; keep the last partition empty by adding
+  boundaries ahead of the data — `PartitionBoundaries.Monthly` with a generous `count` is the intended shape.
+- NEW: boundaries are compared as literal text. A boundary rewritten without changing its value —
+  `'20260801'` to `'2026-08-01'` — reads as one removed and one added, which is a `MERGE` and a
+  `SPLIT`, and the entry above says what a split costs. Use one spelling throughout; `PartitionBoundaries`
+  exists to make that the easy path.
+- NEW: a temporal or memory-optimized table cannot be placed on a partition scheme through this package —
+  `CodeFirstDatabaseObjectsMigrationsSqlGenerator` throws `NotSupportedException` for both. The provider writes
+  a `WITH (…)` clause after the column list for each, a temporal table's history table would need placing as
+  well, and neither ordering has been driven against a server. SQL Server does not partition memory-optimized
+  tables at all.
+- NEW: a renamed table is matched to its new name through the entity types mapped to it, the way EF itself
+  scaffolds the `RenameTableOperation`: an index that merely followed its table emits nothing, a renamed
+  index emits `sp_rename` against the new table name, a removed one emits `DROP INDEX` against the old name
+  before EF's operations run, and a placement change hidden behind a rename is refused like any other. Two
+  edges remain. When several tables swap names in one migration so that a source table shares entity types
+  with more than one new table, the match is left unmade and that table reads as dropped-and-created — a
+  redundant, guarded `CREATE` at worst. And renaming the partition property and its column in the same
+  migration reads as a placement change and is refused; rename one, migrate, rename the other.
+- NEW: SQL Server only, by construction. `CREATE PARTITION FUNCTION`, `sp_rename` on an index and clustered
+  columnstore indexes have no equivalent in the other providers, and the generator subclasses the SQL Server
+  one.
 - WITHDRAWN, and left here because a wrong entry is worth correcting in public: `decimal` declared
   without an explicit scale was said to default the scale to 0 and truncate. It does not. A zero scale is
   never put on the wire — SqlClient serialises a parameter's scale only when it is non-zero — so a

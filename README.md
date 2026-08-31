@@ -11,7 +11,7 @@ the gap this family closes.
 | Package | What it does |
 |---|---|
 | **`Raptor21.EF.Extensions.StoredProcedures`** | The runtime — contracts, a contract-driven executor and a live-schema validator — plus the Roslyn source generator, which ships inside this package. |
-| **`Raptor21.EF.Extensions.Migrations`** | Registers those scripts on the EF model and diffs them, so `dotnet ef migrations add` emits `CREATE OR ALTER` / `DROP` alongside the table DDL. EF Core 10. |
+| **`Raptor21.EF.Extensions.Migrations`** | Registers those scripts on the EF model and diffs them, so `dotnet ef migrations add` emits `CREATE OR ALTER` / `DROP` alongside the table DDL. Carries partition functions and schemes, a table's placement on a scheme and clustered columnstore indexes the same way. EF Core 10, SQL Server. |
 
 The runtime and the generator are separate projects on purpose: schema knowledge is resolved at compile
 time and never by reflection, which is what keeps trimming and AOT working. They are *not* separate
@@ -203,6 +203,10 @@ new DbContextOptionsBuilder<CatalogDbContext>()
     .Options;                                                               // are silently left out
 ```
 
+That single replacement is enough for procedures. A context that also places tables on partition schemes
+calls `.UseCodeFirstDatabaseObjects()` instead, which installs the differ and the SQL generator together —
+see [Partitioning and columnstore](#partitioning-and-columnstore).
+
 `dotnet ef migrations add Initial` then produces one migration containing the table DDL **and** a
 `CREATE OR ALTER` per procedure, with `DROP PROCEDURE IF EXISTS` in `Down`. Change a procedure body and
 the next migration carries only that change; the annotations round-trip through the model snapshot, so
@@ -227,6 +231,84 @@ past. The wrap is unconditional, because plain `migrations script` is no safer �
 `BEGIN TRANSACTION` and separates commands with a newline rather than a batch terminator. The visible
 cost is that the scaffolded migration and the generated script read `EXEC(N'...')` around the procedure
 instead of the bare body. `DROP PROCEDURE IF EXISTS` is bound by no such rule and is left unwrapped.
+
+---
+
+## Partitioning and columnstore
+
+The same mechanism carries a table's physical layout. A partition function, a partition scheme, a table's
+placement on that scheme and a clustered columnstore index are each an annotation on the model, so they
+travel through the snapshot, are diffed against it, and land in the migration next to the table they belong
+to — in the order SQL Server needs them.
+
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.HasPartitionFunction(
+        "pf_EventsMonth", "datetime2(3)", PartitionRange.Right,
+        PartitionBoundaries.Monthly(new DateOnly(2026, 8, 1), count: 12));  // '20260801' … '20270701'
+    modelBuilder.HasPartitionScheme("ps_Events", "pf_EventsMonth");         // ALL TO ([PRIMARY])
+
+    modelBuilder.Entity<Event>(b =>
+    {
+        b.HasKey(e => new { e.Id, e.OccurredAt }).IsClustered(false);  // the columnstore is the clustered index
+        b.OnPartitionScheme("ps_Events", e => e.OccurredAt);            // CREATE TABLE … ON [ps_Events]([OccurredAt])
+        b.HasClusteredColumnstoreIndex("cci_Events");
+    });
+}
+```
+
+```csharp
+new DbContextOptionsBuilder<EventsDbContext>()
+    .UseSqlServer(connectionString)
+    .UseCodeFirstDatabaseObjects()   // replaces the differ AND the migrations SQL generator
+    .Options;
+```
+
+`UseCodeFirstDatabaseObjects()` installs `CodeFirstDatabaseObjectsModelDiffer` and
+`CodeFirstDatabaseObjectsMigrationsSqlGenerator`. A context that declares procedures and nothing else may keep
+the single `ReplaceService<IMigrationsModelDiffer, StoredProcedureModelDiffer>()` it has today — that type is
+now a thin subclass of the new differ and behaves identically. A table placed on a scheme needs both
+replacements, because only the generator writes the `ON` clause: the differ checks which generator is
+registered and refuses to scaffold rather than let the table be created on the default filegroup in silence.
+Both replacements must reach `dotnet ef` and the application alike, as with the differ alone.
+
+`dotnet ef migrations add` then produces, in this order: the partition functions (`CREATE PARTITION FUNCTION`
+behind `IF NOT EXISTS`), the schemes, columnstore drops — before EF's operations, because the direction that
+removes an index may also re-create a clustered primary key, which SQL Server refuses while the columnstore
+stands — then EF's own operations — where the placed table's `CreateTable` carries the scheme and column as
+annotations, and its `CREATE CLUSTERED COLUMNSTORE INDEX` follows immediately, before any nonclustered
+index, so those are built once over the columnstore rather than over a heap — then columnstore indexes added
+to tables that already exist (each just before the first index the same migration adds to its table, when it
+adds one), then procedures, then scheme drops and function drops. `Down` comes out of the same rules with
+the sides swapped. Because the table is
+already on its scheme when its indexes are created, the columnstore and every nonclustered index are aligned
+to the scheme without any of them naming it, which is what makes a partition switchable or truncatable on
+its own later.
+
+Boundaries are T-SQL literals compared as text, so use one spelling: `PartitionBoundaries.Monthly` and
+`PartitionBoundaries.Literal` produce invariant numbers and the two date spellings every SQL Server date
+type reads as year-month-day under any session language — `'20260801'` for a date, ISO 8601 with `T` for a
+datetime; legacy `datetime` reads dash-separated dates through the session's language, and a `dmy` login
+would swap day and month — and the `params object[]`
+overload of `HasPartitionFunction` renders values through `Literal` for you. Add a boundary and the next
+migration carries an idempotent `SPLIT RANGE`, preceded by `ALTER PARTITION SCHEME … NEXT USED` for every
+scheme on the function; remove one and it carries a `MERGE RANGE`. Keep the last partition empty — SQL Server
+refuses to split a populated partition of a columnstore table and moves every row of a rowstore one — so add
+months before they arrive.
+
+What the differ refuses at `migrations add`, each with the fix in the message: a placement on a scheme that
+is not declared; a scheme on a function that is not declared; a partition property that does not exist or
+maps to no column of the table; a columnstore index on a table whose primary key, alternate key or index is
+clustered (declare `HasNoKey()`, or `HasKey(…).IsClustered(false)`); a unique key or index on a partitioned
+table that does not include the partitioning column, which SQL Server requires of every unique index aligned
+to the scheme; and a placed table with any generator other than this package's. What it does not do, and
+says so with a `NotSupportedException`: change a function's type or range direction, a scheme's function or
+filegroup, or an existing table's scheme or column (renaming the table in the same migration does not hide
+the change — tables are matched through their entity types, the way EF matches them when it scaffolds the
+rename) — SQL Server has no `ALTER` for any of those, and moving a
+table means rebuilding its clustered index over the data, which is a migration to write by hand with the
+volume in view. A temporal or memory-optimized table cannot be placed on a scheme through this package.
 
 ---
 

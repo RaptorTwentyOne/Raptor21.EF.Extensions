@@ -5,17 +5,29 @@
     <RootNamespace>Raptor21.EF.Extensions.Migrations.Tests</RootNamespace>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
-    <NoWarn>$(NoWarn);1591</NoWarn>
+    <!-- EF1001: the snapshot round-trip test builds EF's own design-time services, and the SQL Server
+         provider's design-time registration (SqlServerDesignTimeServices) is flagged internal. It is the
+         same service `dotnet ef` resolves, and the point of the test is to run the real snapshot generator. -->
+    <NoWarn>$(NoWarn);1591;EF1001</NoWarn>
   </PropertyGroup>
 
-  <!-- The SQL Server provider, in the test project only. HasDifferences takes an IRelationalModel and
-       IMigrator.GenerateScript is what `dotnet ef migrations script` calls, so both fixes can only be
-       tested against a real provider; hand-rolling a fake IRelationalModel would mean standing in for
-       everything the base differ walks. Neither call opens a connection, so the tests stay offline. The
-       version matches the Relational reference in the shipping package, which still depends on Relational
-       alone — nothing here widens what a consumer installs. -->
+  <!-- The SQL Server provider is what the shipping package references now — its SQL generator extends
+       SqlServerMigrationsSqlGenerator — so the tests get it transitively; it is named here so that the
+       version is pinned in one visible place. HasDifferences takes an IRelationalModel and
+       IMigrator.GenerateScript is what `dotnet ef migrations script` calls, so both are tested against the
+       real provider; hand-rolling a fake IRelationalModel would mean standing in for everything the base
+       differ walks. Neither call opens a connection, so the tests stay offline.
+
+       The Design package is test-only and exists for one assertion: that the real CSharpSnapshotGenerator
+       writes the partition and columnstore annotations into a model snapshot, which is the round trip the
+       whole feature rests on. It is a development dependency, so its compile assets have to be asked for
+       explicitly; nothing here changes what a consumer installs. -->
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>all</IncludeAssets>
+    </PackageReference>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0">
