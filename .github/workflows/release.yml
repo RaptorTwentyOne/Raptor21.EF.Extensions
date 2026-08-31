@@ -29,9 +29,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: |
-            8.0.x
-            10.0.x
+          dotnet-version: 10.0.x
 
       - name: Derive version from tag
         id: version
@@ -61,6 +59,12 @@ jobs:
           pkg=$(ls artifacts/Raptor21.EF.Extensions.StoredProcedures.*.nupkg | grep -v symbols | head -1)
           if ! unzip -l "$pkg" | grep -q 'analyzers/dotnet/cs/.*\.dll'; then
             echo "::error::$pkg contains no analyzers/dotnet/cs/*.dll - refusing to publish a package whose generator is missing."
+            exit 1
+          fi
+          # Same reason, second half: with no targets file no .sql ever reaches the compiler, so every
+          # declaration that leaves a facet to the script silently loses it.
+          if ! unzip -l "$pkg" | grep -q 'buildTransitive/.*\.targets'; then
+            echo "::error::$pkg contains no buildTransitive/*.targets - refusing to publish."
             exit 1
           fi
 
