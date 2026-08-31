@@ -15,6 +15,11 @@ namespace Raptor21.EF.Extensions.StoredProcedures.Tests;
 /// because <c>SqlConnection.CreateCommand()</c> is nothing more than <c>new SqlCommand(null, this)</c>
 /// and performs no I/O. Nothing here needs a server, and nothing here would behave differently if one
 /// were present, because <c>BuildCommand</c> returns before anything is sent.
+///
+/// The connection arrives wrapped in <c>SqlConnectionLease.Own</c>, which is the same lease the default
+/// <c>ISqlConnectionProvider.LeaseAsync</c> produces: an owned connection, inside no transaction. The
+/// lease is deliberately never disposed here — that would dispose the connection, and every case reads
+/// the finished command afterwards.
 /// </remarks>
 public class StoredProcedureExecutorCommandTests
 {
@@ -22,7 +27,7 @@ public class StoredProcedureExecutorCommandTests
     public void BuildCommand_SetsBracketQuotedTwoPartName()
     {
         using var cmd = StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             TestContracts.GetBySku,
             new object?[] { "SKU-1" },
             "[dbo].[Product_GetBySku]");
@@ -36,7 +41,7 @@ public class StoredProcedureExecutorCommandTests
     public void BuildCommand_SetsCommandTypeStoredProcedure()
     {
         using var cmd = StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             TestContracts.Touch,
             new object?[] { 1 },
             "[dbo].[Product_TouchStamp]");
@@ -48,27 +53,62 @@ public class StoredProcedureExecutorCommandTests
     }
 
     [Fact]
-    public void BuildCommand_NeverAssignsATransaction()
+    public void BuildCommand_LeavesTheTransactionNullWhenTheLeaseHasNone()
     {
         using var cmd = StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             TestContracts.Touch,
             new object?[] { 1 },
             "[dbo].[Product_TouchStamp]");
 
-        // Pins the omission that makes it impossible for a generated call to join a caller's
-        // SqlTransaction: the executor is handed a connection it does not own and never asks for one.
-        // Whether it should is arguable — an ambient TransactionScope still works, and adopting a
-        // transaction the executor did not begin has its own hazards — so this records the current
-        // behaviour and documents the gap rather than asserting a fix.
+        // `cmd.Transaction = lease.Transaction` is unconditional, and this is the case where the value is
+        // null: an owned lease is inside no transaction, because the library opened the connection itself
+        // a statement earlier. Assigning null is a no-op, so the command is exactly what it always was —
+        // which is the whole of what a consumer without a unit of work sees of this change.
+        //
+        // The non-null half cannot be asserted here: SqlTransaction has no public constructor and cannot
+        // be obtained without a server, so it is proved by the sample's live borrowing step instead.
         Assert.Null(cmd.Transaction);
+    }
+
+    [Fact]
+    public void BuildCommand_BuildsOnTheLeasesConnection()
+    {
+        var connection = new SqlConnection();
+
+        using var cmd = StoredProcedureExecutor.BuildCommand(
+            SqlConnectionLease.Own(connection),
+            TestContracts.Touch,
+            new object?[] { 1 },
+            "[dbo].[Product_TouchStamp]");
+
+        // The command comes from the lease's connection and from nowhere else, so a borrowing provider's
+        // connection is the one every parameter is bound against.
+        Assert.Same(connection, cmd.Connection);
+    }
+
+    [Fact]
+    public void BuildCommand_DefaultLease_ThrowsBeforeTheArityCheck()
+    {
+        // A struct is default-constructible whether the library likes it or not, so `default` is a value a
+        // caller can reach: it is what a hand-written provider returns from an unimplemented LeaseAsync.
+        // Reading lease.Connection first is what the old ArgumentNullException.ThrowIfNull(connection)
+        // became, and it keeps this file's ordering rule — everything decidable from the arguments alone
+        // is decided before a SqlCommand exists — with the arity mismatch below never reached.
+        var ex = Assert.Throws<InvalidOperationException>(() => StoredProcedureExecutor.BuildCommand(
+            default,
+            TestContracts.Touch,
+            Array.Empty<object?>(),
+            "[dbo].[Product_TouchStamp]"));
+
+        Assert.Contains("LeaseAsync", ex.Message);
     }
 
     [Fact]
     public void BuildCommand_PrependsReturnParameterAtIndexZero()
     {
         using var cmd = StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             TestContracts.Upsert,
             new object?[] { "s", "n", 1.5m, 0 },
             "[dbo].[Product_Upsert]");
@@ -85,7 +125,7 @@ public class StoredProcedureExecutorCommandTests
     public void BuildCommand_ZeroParameterContract_StillGetsTheReturnParameter()
     {
         using var cmd = StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             TestContracts.Ping,
             Array.Empty<object?>(),
             "[dbo].[Ping]");
@@ -109,7 +149,7 @@ public class StoredProcedureExecutorCommandTests
             ]);
 
         using var cmd = StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             contract,
             new object?[] { 1, 2, 3 },
             "[dbo].[P]");
@@ -129,7 +169,7 @@ public class StoredProcedureExecutorCommandTests
         var contract = TestContracts.OneParameter("@Name", new SqlTypeSpec("varchar"));
 
         using var cmd = StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             contract,
             new object?[] { null },
             "[dbo].[P]");
@@ -146,7 +186,7 @@ public class StoredProcedureExecutorCommandTests
         var contract = TestContracts.OneParameter("@Id", new SqlTypeSpec("int"));
 
         using var cmd = StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             contract,
             new object?[] { "7" },
             "[dbo].[P]");
@@ -164,7 +204,7 @@ public class StoredProcedureExecutorCommandTests
         // Upsert's @Id is the contract's fourth parameter and IsOutput, so the RETURN slot pushes it to
         // command index 4.
         using var cmd = StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             TestContracts.Upsert,
             new object?[] { "SKU-9", "Widget", 9.99m, 42 },
             "[dbo].[Product_Upsert]");
@@ -193,9 +233,9 @@ public class StoredProcedureExecutorCommandTests
         // falls back to the length of its own value whenever no size was set, which a seeded string would
         // quietly mask.
         using var characterCommand = StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(), character, new object?[] { null }, "[dbo].[P]");
+            SqlConnectionLease.Own(new SqlConnection()), character, new object?[] { null }, "[dbo].[P]");
         using var binaryCommand = StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(), binary, new object?[] { null }, "[dbo].[P]");
+            SqlConnectionLease.Own(new SqlConnection()), binary, new object?[] { null }, "[dbo].[P]");
 
         Assert.Equal(ParameterDirection.Output, characterCommand.Parameters[1].Direction);
         Assert.Equal(ParameterDirection.Output, binaryCommand.Parameters[1].Direction);
@@ -215,7 +255,7 @@ public class StoredProcedureExecutorCommandTests
         var contract = TestContracts.OneParameter("@AccountID", new SqlTypeSpec("varchar", 21));
 
         using var cmd = StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             contract,
             new object?[] { new string('x', 25) },
             "[dbo].[P]");
@@ -240,7 +280,7 @@ public class StoredProcedureExecutorCommandTests
             ]);
 
         var ex = Assert.Throws<ArgumentException>(() => StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             contract,
             new object?[] { 1, 2, 3 },
             "[dbo].[X]"));
@@ -264,7 +304,7 @@ public class StoredProcedureExecutorCommandTests
         // StoredProcedureValidator and StoredProcedureSchemaManager both guard their arguments, so the
         // library is inconsistent with itself rather than deliberately unguarded.
         var ex = Assert.Throws<ArgumentNullException>(() => StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             null!,
             Array.Empty<object?>(),
             "[dbo].[X]"));
@@ -279,7 +319,7 @@ public class StoredProcedureExecutorCommandTests
         // `parameterValues.Length` — after the SqlCommand has already been created and the RETURN
         // parameter added, so the half-built command is abandoned undisposed on the way out.
         var ex = Assert.Throws<ArgumentNullException>(() => StoredProcedureExecutor.BuildCommand(
-            new SqlConnection(),
+            SqlConnectionLease.Own(new SqlConnection()),
             TestContracts.Ping,
             null!,
             "[dbo].[Ping]"));

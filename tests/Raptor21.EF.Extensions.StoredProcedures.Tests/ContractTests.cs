@@ -158,7 +158,7 @@ public class ContractTests
             new ProcReturnSpec(ReturnKind.ResultSet, new SqlTypeSpec("int")));
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => executor.ExecuteReturnResultSetAsync<ProductRow>(connection, sayingResultSet, []));
+            () => executor.ExecuteReturnResultSetAsync<ProductRow>(SqlConnectionLease.Own(connection), sayingResultSet, []));
         Assert.Contains("Contract has no ResultColumns", ex.Message);
         Assert.Contains("[dbo].[Ping]", ex.Message);
 
@@ -169,7 +169,7 @@ public class ContractTests
         Assert.NotNull(sayingReturnValue.ResultColumns);
 
         using var cmd = StoredProcedureExecutor.BuildCommand(
-            connection, sayingReturnValue, ["ABC"], "[dbo].[Product_GetBySku]");
+            SqlConnectionLease.Own(connection), sayingReturnValue, ["ABC"], "[dbo].[Product_GetBySku]");
 
         Assert.Equal("[dbo].[Product_GetBySku]", cmd.CommandText);
         Assert.Equal(CommandType.StoredProcedure, cmd.CommandType);

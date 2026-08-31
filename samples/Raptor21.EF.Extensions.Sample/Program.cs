@@ -1,3 +1,4 @@
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Raptor21.EF.Extensions.Sample.Catalog;
 using Raptor21.EF.Extensions.Sample.Data;
@@ -58,3 +59,39 @@ Console.WriteLine($"Listed {page.Count} of {total} products.");
 var listed = await procedures.ListViewAsync(10);
 foreach (var row in listed)
     Console.WriteLine($"  {row.Id,4}  {row.Sku,-10} {row.Name,-20} {row.Price,10:N2}");
+
+// 4. The same generated calls, on a connection and a transaction this program owns. Everything above ran
+//    through SampleConnectionProvider, which creates and opens a connection per call and lets the
+//    generated body dispose it; the group below is built on a provider that borrows instead, and neither
+//    CatalogProcedures nor the generated code knows the difference - the decision is made once, inside
+//    the provider, and the emitted body is the same statement either way.
+//
+//    This is the only place in the repository where enlistment is provable: SqlTransaction has no public
+//    constructor, so `cmd.Transaction = lease.Transaction` with a non-null transaction cannot be reached
+//    without a server. The proof is the rollback - work done by the procedure disappears with the
+//    caller's transaction, which can only happen if the procedure ran inside it.
+const string ScratchSku = "KO-ROLLBACK";
+
+await using (var borrowed = new SqlConnection(connectionString))
+{
+    await borrowed.OpenAsync();
+    await using var tx = borrowed.BeginTransaction();
+
+    var enlisted = new CatalogProcedures(
+        new BorrowedConnectionProvider(borrowed, tx),
+        new StoredProcedureExecutor());
+
+    var (_, scratchId) = await enlisted.UpsertAsync(ScratchSku, "Scratch row", 1.00m, 0);
+    var insideTransaction = await enlisted.GetBySkuAsync(ScratchSku);
+    Console.WriteLine($"Borrowed connection: upserted id={scratchId}, visible inside the transaction: {insideTransaction.Count} row(s).");
+
+    await tx.RollbackAsync();
+
+    // The borrowed connection outlives every call made on it: the lease never disposed it, and it is
+    // still open here, which is what lets a caller run a procedure in the middle of its own unit of work.
+    Console.WriteLine($"After rollback the borrowed connection is still {borrowed.State}.");
+}
+
+// And through the ordinary provider - a fresh connection, no transaction - the row is gone.
+var afterRollback = await procedures.GetBySkuAsync(ScratchSku);
+Console.WriteLine($"After rollback, on a separate connection: {afterRollback.Count} row(s).");

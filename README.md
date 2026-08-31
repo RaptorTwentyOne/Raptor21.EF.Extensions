@@ -129,6 +129,40 @@ services.AddSingleton<IStoredProcedureExecutor, StoredProcedureExecutor>();
 services.AddSingleton<AccountProcedures>();
 ```
 
+The executor is stateless — every method takes its connection as an argument — so it is a singleton
+whatever else you do. The provider and the group class share one lifetime: a provider that hands out a
+per-request connection must be scoped, and the group class that holds it must be scoped too, or the
+container refuses it as a captive dependency.
+
+### Joining a caller's transaction
+
+A generated call runs on whatever its `ISqlConnectionProvider` gives it. The default gives it a fresh
+connection it opens and disposes for the one call, which is the shape above. A provider that overrides
+`LeaseAsync` gives it a connection somebody else owns — an ORM's, a unit of work's — and the transaction
+that connection is inside:
+
+```csharp
+public sealed class UnitOfWorkConnectionProvider(IUnitOfWork unitOfWork) : ISqlConnectionProvider
+{
+    // Never reached: generated bodies call LeaseAsync. Throwing says so rather than quietly
+    // handing back the second connection this type exists to avoid.
+    public SqlConnection Create() => throw new NotSupportedException("This provider borrows.");
+
+    public ValueTask<SqlConnectionLease> LeaseAsync(CancellationToken ct = default) =>
+        new(SqlConnectionLease.Borrow(unitOfWork.Connection, unitOfWork.Transaction));
+}
+```
+
+`Borrow` takes the abstract `DbConnection`/`DbTransaction`, because that is what an ORM hands back, and
+narrows once — naming the offending provider if it is not SqlClient's, since parameter binding sets
+`SqlDbType` and no other provider has one. The borrowed connection is never opened, never closed and
+never disposed by this library; pass an `IAsyncDisposable` as `Borrow`'s third argument when the provider
+itself had to open something, and the lease runs it exactly once. Nothing in the generated body branches
+on any of this, so registering the default provider keeps exactly the behaviour it has today.
+
+`StoredProcedureSchemaManager`, `ValidateAsync` and `ApplyEmbeddedScriptsAsync` are not part of this:
+they still take a connection string and open a connection of their own.
+
 ### Startup: apply scripts + validate contracts against the live DB
 
 ```csharp

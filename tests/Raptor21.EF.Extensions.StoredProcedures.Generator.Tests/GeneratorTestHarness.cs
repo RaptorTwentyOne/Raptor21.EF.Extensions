@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Reflection;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -54,6 +55,45 @@ internal static class GeneratorTestHarness
             .ToImmutableArray();
 
         return new RunResult(generatedText, generatorDiagnostics, outputErrors);
+    }
+
+    /// <summary>Runs the generator, compiles what it emitted, and loads the result so a generated body can be run.</summary>
+    /// <remarks>
+    /// Every other method here asserts on the emitted TEXT, which pins what the generator writes but says
+    /// nothing about what the writing does. Loading the assembly is what turns "the body contains one
+    /// <c>await using</c>" into "the body disposes what it leased, after the executor call, and only what
+    /// the provider said it owned" - which is the claim the borrowing design actually rests on, and the
+    /// one a text assertion cannot reach.
+    /// <para>
+    /// The assembly goes into the default load context, so its reference to the runtime library binds to
+    /// the very assembly this project already has loaded - which is what lets a test implement
+    /// <c>ISqlConnectionProvider</c> here and have generated code accept it.
+    /// </para>
+    /// </remarks>
+    public static Assembly RunAndLoad(string source)
+    {
+        var tree = CSharpSyntaxTree.ParseText(source);
+        var compilation = Compile(tree);
+
+        CSharpGeneratorDriver
+            .Create(
+                new[] { new StoredProcedureGenerator().AsSourceGenerator() },
+                AdditionalTexts(),
+                (CSharpParseOptions)tree.Options)
+            .RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out _);
+
+        using var peStream = new MemoryStream();
+        var emitted = outputCompilation.Emit(peStream);
+
+        // Emit does strictly more than GetDiagnostics - it has to write metadata and IL for everything the
+        // generator produced - so the failure is reported here in full rather than as a load error later.
+        if (!emitted.Success)
+            throw new InvalidOperationException(
+                "The generated code did not compile:\n" + string.Join(
+                    "\n",
+                    emitted.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).Select(d => $"{d.Id}: {d.GetMessage()}")));
+
+        return Assembly.Load(peStream.ToArray());
     }
 
     /// <summary>Runs the generator with step tracking on, so a later edit can be asked what re-ran.</summary>

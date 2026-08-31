@@ -26,7 +26,7 @@ public class StoredProcedureExecutorGuardTests
         using var connection = new SqlConnection();
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => executor.ExecuteReturnResultSetAsync<ProductRow>(connection, contract, new object?[] { 1 }));
+            () => executor.ExecuteReturnResultSetAsync<ProductRow>(SqlConnectionLease.Own(connection), contract, new object?[] { 1 }));
 
         // One value for one contract parameter, so the arity check cannot be what fired; and both of the
         // remaining candidates are InvalidOperationException, which is why the message is what tells them
@@ -50,9 +50,9 @@ public class StoredProcedureExecutorGuardTests
         using var connection = new SqlConnection();
 
         var emptyEx = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => executor.ExecuteReturnResultSetAsync<ProductRow>(connection, emptyColumns, new object?[] { 1 }));
+            () => executor.ExecuteReturnResultSetAsync<ProductRow>(SqlConnectionLease.Own(connection), emptyColumns, new object?[] { 1 }));
         var nullEx = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => executor.ExecuteReturnResultSetAsync<ProductRow>(connection, TestContracts.Touch, new object?[] { 1 }));
+            () => executor.ExecuteReturnResultSetAsync<ProductRow>(SqlConnectionLease.Own(connection), TestContracts.Touch, new object?[] { 1 }));
 
         // The executor reads an empty ResultColumns as "no result set" rather than "a result set with no
         // columns", and says so in exactly the same words it uses for null. The validator reads the same
@@ -72,7 +72,7 @@ public class StoredProcedureExecutorGuardTests
         using var connection = new SqlConnection();
 
         var ex = await Assert.ThrowsAsync<ArgumentException>(
-            () => executor.ExecuteNonQueryAsync(connection, contract, new object?[] { "s" }));
+            () => executor.ExecuteNonQueryAsync(SqlConnectionLease.Own(connection), contract, new object?[] { "s" }));
 
         // The arity check sits inside BuildCommand, before the command is ever executed, so it beats the
         // connection-state failure this same closed connection would otherwise have produced. That
@@ -93,7 +93,7 @@ public class StoredProcedureExecutorGuardTests
         using var connection = new SqlConnection("Server=nosuchhost.invalid;Database=x;Connect Timeout=1;");
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => executor.ExecuteNonQueryAsync(connection, contract, new object?[] { 1 }));
+            () => executor.ExecuteNonQueryAsync(SqlConnectionLease.Own(connection), contract, new object?[] { 1 }));
 
         // The executor has no ConnectionState guard of its own and wraps nothing, so a caller who forgot
         // to open the connection gets SqlClient's message with no hint of which procedure was being run —

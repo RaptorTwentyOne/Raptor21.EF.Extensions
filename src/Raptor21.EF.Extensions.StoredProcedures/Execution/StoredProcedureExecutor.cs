@@ -9,29 +9,29 @@ namespace Raptor21.EF.Extensions.StoredProcedures.Execution;
 /// <summary>Contract-driven executor: builds SqlCommand from IStoredProcedureContract only (no string literals for proc/params).</summary>
 public sealed class StoredProcedureExecutor : IStoredProcedureExecutor
 {
-    public async Task<int> ExecuteReturnInt32Async(SqlConnection connection, IStoredProcedureContract contract, object?[] parameterValues, CancellationToken cancellationToken = default)
+    public async Task<int> ExecuteReturnInt32Async(SqlConnectionLease lease, IStoredProcedureContract contract, object?[] parameterValues, CancellationToken cancellationToken = default)
     {
-        var value = await ExecuteReturnValueAsync(connection, contract, parameterValues, cancellationToken).ConfigureAwait(false);
+        var value = await ExecuteReturnValueAsync(lease, contract, parameterValues, cancellationToken).ConfigureAwait(false);
         return Convert.ToInt32(value);
     }
 
-    public async Task<short> ExecuteReturnInt16Async(SqlConnection connection, IStoredProcedureContract contract, object?[] parameterValues, CancellationToken cancellationToken = default)
+    public async Task<short> ExecuteReturnInt16Async(SqlConnectionLease lease, IStoredProcedureContract contract, object?[] parameterValues, CancellationToken cancellationToken = default)
     {
-        var value = await ExecuteReturnValueAsync(connection, contract, parameterValues, cancellationToken).ConfigureAwait(false);
+        var value = await ExecuteReturnValueAsync(lease, contract, parameterValues, cancellationToken).ConfigureAwait(false);
         return Convert.ToInt16(value);
     }
 
-    public async Task ExecuteNonQueryAsync(SqlConnection connection, IStoredProcedureContract contract, object?[] parameterValues, CancellationToken cancellationToken = default)
+    public async Task ExecuteNonQueryAsync(SqlConnectionLease lease, IStoredProcedureContract contract, object?[] parameterValues, CancellationToken cancellationToken = default)
     {
         var fullName = $"[{contract.Schema}].[{contract.Name}]";
-        await using var cmd = BuildCommand(connection, contract, parameterValues, fullName);
+        await using var cmd = BuildCommand(lease, contract, parameterValues, fullName);
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<(int ReturnValue, IReadOnlyList<object?> Outputs)> ExecuteWithOutputsAsync(SqlConnection connection, IStoredProcedureContract contract, object?[] parameterValues, CancellationToken cancellationToken = default)
+    public async Task<(int ReturnValue, IReadOnlyList<object?> Outputs)> ExecuteWithOutputsAsync(SqlConnectionLease lease, IStoredProcedureContract contract, object?[] parameterValues, CancellationToken cancellationToken = default)
     {
         var fullName = $"[{contract.Schema}].[{contract.Name}]";
-        await using var cmd = BuildCommand(connection, contract, parameterValues, fullName);
+        await using var cmd = BuildCommand(lease, contract, parameterValues, fullName);
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
         var returnValue = cmd.Parameters[0].Value is int i ? i : 0;
@@ -39,7 +39,7 @@ public sealed class StoredProcedureExecutor : IStoredProcedureExecutor
     }
 
     public async Task<(int ReturnValue, IReadOnlyList<TRow> Rows)> ExecuteReturnResultSetAsync<TRow>(
-        SqlConnection connection,
+        SqlConnectionLease lease,
         IStoredProcedureContract contract,
         object?[] parameterValues,
         CancellationToken cancellationToken = default)
@@ -49,19 +49,21 @@ public sealed class StoredProcedureExecutor : IStoredProcedureExecutor
         if (contract.ResultColumns is null || contract.ResultColumns.Count == 0)
             throw new InvalidOperationException($"{fullName}: Contract has no ResultColumns; use ExecuteReturnInt32Async or set ResultColumns for result set procedures.");
 
-        await using var cmd = BuildCommand(connection, contract, parameterValues, fullName);
+        await using var cmd = BuildCommand(lease, contract, parameterValues, fullName);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         var rows = await MaterialiseRowsAsync<TRow>(reader, cancellationToken).ConfigureAwait(false);
         var returnValue = cmd.Parameters[0].Value is int i ? i : 0;
         return (returnValue, rows);
     }
 
-    internal static SqlCommand BuildCommand(SqlConnection connection, IStoredProcedureContract contract, object?[] parameterValues, string fullName)
+    internal static SqlCommand BuildCommand(SqlConnectionLease lease, IStoredProcedureContract contract, object?[] parameterValues, string fullName)
     {
         // Everything decidable from the arguments alone is decided before the command exists, so a caller
         // who passed a null or the wrong number of values is told which argument was wrong instead of
         // being handed a dereference, and no half-built SqlCommand is abandoned undisposed on the way out.
-        ArgumentNullException.ThrowIfNull(connection);
+        // Reading the lease's connection first is what the connection guard became: a default lease is the
+        // one shape that carries none, and it says so by name rather than by NullReferenceException.
+        var connection = lease.Connection;
         ArgumentNullException.ThrowIfNull(contract);
         ArgumentNullException.ThrowIfNull(parameterValues);
 
@@ -70,6 +72,14 @@ public sealed class StoredProcedureExecutor : IStoredProcedureExecutor
             throw new ArgumentException($"Parameter count mismatch for {fullName}: contract has {parameters.Count}, got {parameterValues.Length}.", nameof(parameterValues));
 
         var cmd = connection.CreateCommand();
+
+        // The transaction travels with the connection or the command is refused: SqlClient rejects a
+        // command on a connection with a pending local transaction whose Transaction is unset, before the
+        // server ever sees it. Assigning null is a no-op, which is why this is unconditional and why an
+        // owned lease — which is inside no transaction, having just been opened here — is unaffected. It
+        // is the same shape EmbeddedScriptApplier already uses for its own optional SqlTransaction.
+        cmd.Transaction = lease.Transaction;
+
         cmd.CommandText = fullName;
         cmd.CommandType = CommandType.StoredProcedure;
         cmd.Parameters.Add(CreateReturnParameter());
@@ -106,16 +116,42 @@ public sealed class StoredProcedureExecutor : IStoredProcedureExecutor
         var rows = new List<TRow>();
         while (await reader.ReadAsync(ct).ConfigureAwait(false))
             rows.Add(TRow.FromDataRecord(reader));
-        // The close belongs here rather than back at the call site: SQL Server only populates the RETURN
-        // parameter once the reader is closed, and the caller reads it the moment this returns.
-        await reader.CloseAsync().ConfigureAwait(false);
+        try
+        {
+            // Advance past the rows before closing, and do it for the errors rather than for the data. A
+            // procedure that fails AFTER its last result set — a RAISERROR, or a constraint violation in a
+            // statement that follows the SELECT — reports that failure when the reader is advanced, and
+            // never when it is merely closed: CloseAsync drains the same bytes and swallows what it finds.
+            // Without this loop the call returned its rows and looked successful while the procedure had
+            // actually failed, which is the worst shape a data-access bug can take. Any further result
+            // sets are discarded on purpose — the contract materialises the first and the validator
+            // describes only the first — so this reads them for their errors alone.
+            while (await reader.NextResultAsync(ct).ConfigureAwait(false))
+            {
+            }
+        }
+        finally
+        {
+            // The close belongs here rather than back at the call site: SQL Server only populates the RETURN
+            // parameter once the reader is closed, and the caller reads it the moment this returns. On a
+            // borrowed connection it stops being hygiene and becomes correctness — the connection is handed
+            // back to its owner the instant the lease is disposed, and an owner holding a connection with an
+            // open reader cannot run its next command. A refactor that streams rows lazily, or returns before
+            // this line, breaks the RETURN value and every subsequent query in the caller's unit of work.
+            //
+            // In finally, because the drain above can throw: the reader still has to be closed, or a
+            // borrowed connection goes back to its owner unusable and the real error is buried under the
+            // next command's failure.
+            await reader.CloseAsync().ConfigureAwait(false);
+        }
+
         return rows;
     }
 
-    private static async Task<object> ExecuteReturnValueAsync(SqlConnection connection, IStoredProcedureContract contract, object?[] parameterValues, CancellationToken cancellationToken)
+    private static async Task<object> ExecuteReturnValueAsync(SqlConnectionLease lease, IStoredProcedureContract contract, object?[] parameterValues, CancellationToken cancellationToken)
     {
         var fullName = $"[{contract.Schema}].[{contract.Name}]";
-        await using var cmd = BuildCommand(connection, contract, parameterValues, fullName);
+        await using var cmd = BuildCommand(lease, contract, parameterValues, fullName);
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         return cmd.Parameters[0].Value ?? 0;
     }

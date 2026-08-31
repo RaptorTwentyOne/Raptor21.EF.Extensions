@@ -109,9 +109,23 @@ internal sealed class FakeDbDataReader : DbDataReader
         return Task.FromResult(Read());
     }
 
+    /// <summary>
+    /// Makes the next advance throw, which is where a real server reports an error the procedure raised
+    /// after its last result set. SqlDataReader surfaces it from NextResult and swallows it in Close, so
+    /// this is the only shape a fake can use to model the failure that mattered.
+    /// </summary>
+    internal FakeDbDataReader FailOnNextResult(Exception error)
+    {
+        _nextResultError = error;
+        return this;
+    }
+
+    private Exception? _nextResultError;
+
     public override bool NextResult()
     {
         NextResultCallCount++;
+        if (_nextResultError is not null) throw _nextResultError;
         _row = -1;
         return ++_set < _sets.Count;
     }

@@ -166,21 +166,47 @@ public class StoredProcedureExecutorResultTests
     }
 
     [Fact]
-    public async Task MaterialiseRowsAsync_SecondResultSet_IsNeverConsumed()
+    public async Task MaterialiseRowsAsync_SecondResultSet_IsDrainedButNeverMaterialised()
     {
         var reader = ProductReader(10, 20)
             .AddResultSet(ProductColumns, [99, "SKU-99", 9.00m, Stamp]);
 
         var rows = await StoredProcedureExecutor.MaterialiseRowsAsync<ProductRow>(reader, default);
 
-        // A procedure with two SELECTs loses everything after the first without a word: the loop reads
-        // one result set and the close discards the rest. There is nowhere for the second one to go
-        // either — a contract carries a single ColumnSpec list and ExecuteReturnResultSetAsync returns a
-        // single IReadOnlyList<TRow> — so this is a shape the library cannot express rather than a check
-        // it forgot to make. Worth knowing before someone adds a second SELECT to a working procedure and
-        // wonders why the extra rows never arrive.
-        Assert.Equal(0, reader.NextResultCallCount);
+        // Only the first result set becomes rows: a contract carries a single ColumnSpec list and
+        // ExecuteReturnResultSetAsync returns a single IReadOnlyList<TRow>, so a second SELECT is a shape
+        // the library cannot express rather than a check it forgot. Worth knowing before someone adds one
+        // to a working procedure and wonders where the extra rows went.
         Assert.Equal(new[] { 10, 20 }, rows.Select(r => r.Id));
+
+        // But the reader IS advanced past it, and that is not tidiness. ADO.NET surfaces an error the
+        // procedure raises after its last result set only when the reader is advanced; CloseAsync reads
+        // the same bytes and swallows what it finds. Without the drain a RAISERROR after the SELECT came
+        // back as a successful call with rows attached. Deleting this assertion and the loop it guards
+        // restores that, and no assertion about the returned rows would notice.
+        Assert.True(reader.NextResultCallCount > 0);
+    }
+
+    [Fact]
+    public async Task MaterialiseRowsAsync_ErrorRaisedAfterTheLastResultSet_ReachesTheCaller()
+    {
+        var boom = new InvalidOperationException("RAISERROR after the SELECT");
+        var reader = ProductReader(10, 20).FailOnNextResult(boom);
+
+        // The defect this test exists for: the rows arrived, so every assertion about them passed, and
+        // the procedure had failed. SqlDataReader reports a post-result-set error when the reader is
+        // advanced and swallows it when the reader is merely closed, so a materialiser that only closed
+        // returned a successful call for a failed procedure - the one failure shape that no caller can
+        // defend against, because there is nothing to catch.
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => StoredProcedureExecutor.MaterialiseRowsAsync<ProductRow>(reader, default));
+
+        Assert.Same(boom, thrown);
+
+        // And the reader is still closed on the way out. On a borrowed connection an unclosed reader
+        // hands the connection back unusable, so the caller's next command would fail with something
+        // unrelated and bury this error.
+        Assert.Equal(1, reader.CloseCallCount);
     }
 
     [Fact]
