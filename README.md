@@ -332,8 +332,11 @@ b.HasKey(x => new { x.Day, x.ClientKind, x.VkorgKey });
 
 A full-text catalog and a table's full-text index travel the same way: annotations, snapshot, diff, one
 migration. EF has no operation for either, and both are refused inside a transaction by SQL Server (error 574),
-so each statement is emitted as a `Sql(..., suppressTransaction: true)` — EF commits the migration's
-transaction before it and opens a new one after.
+so each statement runs outside the migration's transaction — EF commits before it and opens a new one after.
+The scaffolded migration shows that as `migrationBuilder.Sql("...").Annotation("Raptor21:SuppressTransaction", true)`
+rather than the `suppressTransaction:` argument, because EF's scaffolder never writes the argument and does
+write the annotation; the package's SQL generator turns the annotation back into the flag, which is why a
+full-text declaration needs `UseCodeFirstDatabaseObjects()` and is refused under the single differ replacement.
 
 ```csharp
 protected override void OnModelCreating(ModelBuilder modelBuilder)

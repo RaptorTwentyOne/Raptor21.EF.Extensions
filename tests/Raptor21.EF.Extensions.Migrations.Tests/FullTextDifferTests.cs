@@ -1,9 +1,13 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations.Design;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
+using Microsoft.EntityFrameworkCore.SqlServer.Design.Internal;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace Raptor21.EF.Extensions.Migrations.Tests;
@@ -61,6 +65,50 @@ public class FullTextDifferTests
         var others = up.Concat(down).OfType<SqlOperation>().Where(o => !o.Sql.Contains("FULLTEXT", StringComparison.Ordinal)).ToList();
         Assert.NotEmpty(others);
         Assert.All(others, o => Assert.False(o.SuppressTransaction));
+
+        // The flag does not survive EF's C# scaffold; the annotation does, and the generator reads it back.
+        Assert.All(fullText, o => Assert.Equal(true, o[CodeFirstAnnotations.SuppressTransaction]));
+        Assert.All(others, o => Assert.Null(o[CodeFirstAnnotations.SuppressTransaction]));
+    }
+
+    [Fact]
+    public void ScaffoldedMigration_CarriesTheSuppressTransactionAnnotation()
+    {
+        // EF's CSharpMigrationOperationGenerator writes migrationBuilder.Sql("...") for a SqlOperation and never
+        // the suppressTransaction argument, but it writes every annotation. This is the round trip a consumer's
+        // migration actually takes, run through EF's real design-time services.
+        using var context = new CustomersFullText();
+        var services = new ServiceCollection().AddEntityFrameworkDesignTimeServices();
+        new SqlServerDesignTimeServices().ConfigureDesignTimeServices(services);
+        services.AddDbContextDesignTimeServices(context);
+        using var provider = services.BuildServiceProvider();
+
+        var up = Diff<Baseline, CustomersFullText>();
+        var down = Diff<CustomersFullText, Baseline>();
+        var code = provider.GetRequiredService<IMigrationsCodeGenerator>()
+            .GenerateMigration("Fx.Migrations", "FullText", up, down);
+
+        Assert.DoesNotContain("suppressTransaction", code, StringComparison.Ordinal);
+        // Up: the catalog and the index; Down: the catalog alone, because DROP TABLE takes the index with it.
+        Assert.Equal(3, code.Split(".Annotation(\"Raptor21:SuppressTransaction\", true)").Length - 1);
+    }
+
+    [Fact]
+    public void Generator_RunsAnAnnotatedSqlOperationOutsideTheTransaction()
+    {
+        // What a scaffolded migration hands the generator: the annotation, and the flag left at its default.
+        using var context = new CustomersFullText();
+        var operation = new SqlOperation { Sql = "CREATE FULLTEXT CATALOG [ft_Account];" };
+        operation[CodeFirstAnnotations.SuppressTransaction] = true;
+        var plain = new SqlOperation { Sql = "SELECT 1;" };
+
+        var commands = context.GetService<IMigrationsSqlGenerator>().Generate([operation, plain], context.GetService<IDesignTimeModel>().Model);
+
+        Assert.Collection(
+            commands,
+            c => Assert.True(c.TransactionSuppressed),
+            c => Assert.False(c.TransactionSuppressed));
+        Assert.False(operation.SuppressTransaction is false && commands[0].TransactionSuppressed is false);
     }
 
     [Fact]
@@ -196,6 +244,7 @@ public class FullTextDifferTests
     [InlineData(typeof(UnmappedProperty), "'Missing'")]
     [InlineData(typeof(KeylessWithoutKeyIndex), "has none")]
     [InlineData(typeof(CatalogDeclaredInTwoCasings), "case-insensitively")]
+    [InlineData(typeof(FullTextWithoutGenerator), "UseCodeFirstDatabaseObjects()")]
     public void AModelThatCannotDeploy_IsRefusedAtScaffoldTime(Type targetType, string expectedInMessage)
     {
         using var source = new Baseline();
@@ -497,6 +546,23 @@ public class FullTextDifferTests
             base.OnModelCreating(modelBuilder);
             modelBuilder.HasFullTextCatalog("ft_Account");
             Customers(modelBuilder).HasNoKey().HasFullTextIndex("ft_Account", c => c.FullName);
+        }
+    }
+
+    private sealed class FullTextWithoutGenerator : DbContext
+    {
+        // The old single replacement: the differ alone. It refuses a full-text declaration, because the flag the
+        // scaffold drops can only be restored by the generator half.
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+            => optionsBuilder
+                .UseSqlServer("Server=host-that-must-never-be-contacted;Database=none")
+                .ReplaceService<IMigrationsModelDiffer, StoredProcedureModelDiffer>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.HasDefaultSchema("dbo");
+            modelBuilder.HasFullTextCatalog("ft_Account");
+            modelBuilder.Entity<Customer>().ToTable("Customers").HasFullTextIndex("ft_Account", c => c.FullName);
         }
     }
 

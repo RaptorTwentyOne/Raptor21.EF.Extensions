@@ -55,4 +55,13 @@ public static class CodeFirstAnnotations
     /// index and the change tracking. Property names, for the same reason as <see cref="PartitionColumn"/>.
     /// </summary>
     public const string FullTextIndex = "Raptor21:FullTextIndex";
+
+    /// <summary>
+    /// Operation-level, on a <c>SqlOperation</c>: <see langword="true"/> when the statement must run outside the
+    /// migration's transaction. The differ sets <c>SqlOperation.SuppressTransaction</c> as well, but EF's C#
+    /// scaffolder writes <c>migrationBuilder.Sql("...")</c> without that flag, so a scaffolded migration would lose
+    /// it; annotations are scaffolded, and <see cref="CodeFirstDatabaseObjectsMigrationsSqlGenerator"/> restores the
+    /// flag from this one when the migration runs.
+    /// </summary>
+    public const string SuppressTransaction = "Raptor21:SuppressTransaction";
 }

@@ -25,7 +25,7 @@ surface is not a compatibility commitment.
   nuget.org trusted publishing (OIDC).
 
 
-- 674 tests across the three suites — 285 over the runtime library, 210 over the migration package, 179
+- 677 tests across the three suites — 285 over the runtime library, 213 over the migration package, 179
   over the generator — and not one needs a SQL Server, a network or the file system. Ten pure statics
   sit behind the runtime library's `InternalsVisibleTo` to make that possible: eight widened from
   `private`, and two lifted out of loops that had been written inline. No existing public signature was
@@ -236,6 +236,14 @@ surface is not a compatibility commitment.
   undeclared catalog; a key index that is not unique, not single-column or nullable; a column that is not
   character or xml; an unmapped property. `FullTextDiff.Compute` and `FullTextLayout.FromModel` are the
   public pure halves, like the other three.
+
+  The flag travels as an annotation. EF's C# scaffolder writes a `SqlOperation` as
+  `migrationBuilder.Sql("...")` and never the `suppressTransaction` argument — which the first migration
+  against a real server showed: the scaffolded statements ran inside the transaction and SQL Server refused
+  them. The differ now also stamps `Raptor21:SuppressTransaction` on the operation, which the scaffold keeps,
+  and `CodeFirstDatabaseObjectsMigrationsSqlGenerator` sets the flag back from it when the migration runs.
+  A full-text declaration therefore needs the generator half, and the differ refuses one under the old
+  single `ReplaceService<IMigrationsModelDiffer, ...>()` the way it refuses a placed table.
 - `README` — the `ValueGeneratedNever()` shape for a key over a computed column, next to the columnstore
   section, because it is the question `HasNoKey()` raises next and it is EF's own answer, not this package's.
 

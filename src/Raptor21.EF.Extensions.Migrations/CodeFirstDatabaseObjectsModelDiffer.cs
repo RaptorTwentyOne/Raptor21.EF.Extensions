@@ -343,20 +343,37 @@ public class CodeFirstDatabaseObjectsModelDiffer : MigrationsModelDiffer
 
     private void RequireGeneratorFor(CodeFirstTableLayout targetTables)
     {
-        if (targetTables.Placements.Count == 0 || _migrationsSqlGenerator is CodeFirstDatabaseObjectsMigrationsSqlGenerator)
+        if (_migrationsSqlGenerator is CodeFirstDatabaseObjectsMigrationsSqlGenerator)
             return;
 
         // The differ can annotate the CreateTableOperation all it likes; only the generator can turn the
         // annotation into an ON clause. With the provider's own generator the annotation is ignored, the
         // table is created on the default filegroup, the migration applies cleanly and nothing ever says
         // so — the one failure mode this whole feature must not have.
-        var table = targetTables.Placements.Values.First();
-        throw new InvalidOperationException(
-            $"Table '{table.Table}' is placed on partition scheme '{table.Scheme}', but the registered " +
-            $"IMigrationsSqlGenerator is {_migrationsSqlGenerator.GetType().Name}, which would create the table " +
-            "on the default filegroup without the ON clause and report success. Configure the context with " +
-            "UseCodeFirstDatabaseObjects(), which replaces both the differ and the SQL generator, instead of " +
-            "ReplaceService<IMigrationsModelDiffer, ...>() alone.");
+        if (targetTables.Placements.Count > 0)
+        {
+            var table = targetTables.Placements.Values.First();
+            throw new InvalidOperationException(
+                $"Table '{table.Table}' is placed on partition scheme '{table.Scheme}', but the registered " +
+                $"IMigrationsSqlGenerator is {_migrationsSqlGenerator.GetType().Name}, which would create the table " +
+                "on the default filegroup without the ON clause and report success. Configure the context with " +
+                "UseCodeFirstDatabaseObjects(), which replaces both the differ and the SQL generator, instead of " +
+                "ReplaceService<IMigrationsModelDiffer, ...>() alone.");
+        }
+
+        // Full-text is the other object that needs the generator: the scaffold keeps the SuppressTransaction
+        // annotation but not the flag, and only the generator turns the annotation back into the flag. Without
+        // it the scaffolded migration runs CREATE FULLTEXT inside the transaction and fails at database update.
+        if (targetTables.FullText.Count > 0)
+        {
+            var (table, _) = targetTables.FullText.First();
+            throw new InvalidOperationException(
+                $"Table '{table}' declares a full-text index, but the registered IMigrationsSqlGenerator is " +
+                $"{_migrationsSqlGenerator.GetType().Name}, which would run the full-text statements of the scaffolded " +
+                "migration inside the migration's transaction, where SQL Server refuses them. Configure the context with " +
+                "UseCodeFirstDatabaseObjects(), which replaces both the differ and the SQL generator, instead of " +
+                "ReplaceService<IMigrationsModelDiffer, ...>() alone.");
+        }
     }
 
     // Rebuilds EF's own source-to-target table matching over the layouts: identical (schema, name) first,
@@ -486,8 +503,16 @@ public class CodeFirstDatabaseObjectsModelDiffer : MigrationsModelDiffer
             => placement is null ? "no partition scheme" : $"partition scheme '{placement.Scheme}' by column '{placement.Column}'";
     }
 
+    // SuppressTransaction is the property EF's migrator reads; the annotation is what survives the scaffold. Both
+    // are set, so the operation behaves the same whether it is executed straight from the differ (a test, or
+    // Migrate() over pending model changes) or after a round trip through a scaffolded migration.
     private static SqlOperation Sql(string sql, bool suppressTransaction = false)
-        => new() { Sql = sql, SuppressTransaction = suppressTransaction };
+    {
+        var operation = new SqlOperation { Sql = sql, SuppressTransaction = suppressTransaction };
+        if (suppressTransaction)
+            operation[CodeFirstAnnotations.SuppressTransaction] = true;
+        return operation;
+    }
 }
 
 /// <summary>Everything this package adds to one diff, computed once and read by both entry points.</summary>

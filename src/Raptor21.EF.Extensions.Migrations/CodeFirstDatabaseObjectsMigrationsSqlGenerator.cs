@@ -6,11 +6,14 @@ using Microsoft.EntityFrameworkCore.Update;
 namespace Raptor21.EF.Extensions.Migrations;
 
 /// <summary>
-/// The SQL Server migrations SQL generator, extended to place a table on a partition scheme: a
-/// <see cref="CreateTableOperation"/> carrying <see cref="CodeFirstAnnotations.PartitionScheme"/> and
-/// <see cref="CodeFirstAnnotations.PartitionColumn"/> — put there by
-/// <see cref="CodeFirstDatabaseObjectsModelDiffer"/> — is written as
-/// <c>CREATE TABLE ... ON [scheme]([column])</c>. Every other operation is the provider's own.
+/// The SQL Server migrations SQL generator, extended in two places. A <see cref="CreateTableOperation"/> carrying
+/// <see cref="CodeFirstAnnotations.PartitionScheme"/> and <see cref="CodeFirstAnnotations.PartitionColumn"/> — put
+/// there by <see cref="CodeFirstDatabaseObjectsModelDiffer"/> — is written as
+/// <c>CREATE TABLE ... ON [scheme]([column])</c>. A <see cref="SqlOperation"/> carrying
+/// <see cref="CodeFirstAnnotations.SuppressTransaction"/> runs outside the migration's transaction, which is how
+/// a full-text statement survives the scaffold: EF's C# generator writes <c>migrationBuilder.Sql("...")</c>
+/// without the <c>suppressTransaction</c> argument but with the operation's annotations. Every other operation
+/// is the provider's own.
 /// </summary>
 /// <remarks>
 /// Installed by <see cref="CodeFirstDbContextOptionsBuilderExtensions.UseCodeFirstDatabaseObjects(Microsoft.EntityFrameworkCore.DbContextOptionsBuilder)"/>.
@@ -26,6 +29,18 @@ public class CodeFirstDatabaseObjectsMigrationsSqlGenerator(
     // The provider's own annotation names, spelled the way SqlServerAnnotationNames spells them.
     private const string IsTemporal = "SqlServer:IsTemporal";
     private const string MemoryOptimized = "SqlServer:MemoryOptimized";
+
+    /// <summary>
+    /// Writes the provider's statement, outside the migration's transaction when the operation carries
+    /// <see cref="CodeFirstAnnotations.SuppressTransaction"/> — the flag the scaffold dropped, restored.
+    /// </summary>
+    protected override void Generate(SqlOperation operation, IModel? model, MigrationCommandListBuilder builder)
+    {
+        if (operation[CodeFirstAnnotations.SuppressTransaction] is true)
+            operation.SuppressTransaction = true;
+
+        base.Generate(operation, model, builder);
+    }
 
     /// <summary>
     /// Writes the provider's <c>CREATE TABLE</c>, followed by <c>ON [scheme]([column])</c> when the operation
