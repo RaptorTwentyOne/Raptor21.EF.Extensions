@@ -9,8 +9,9 @@ public static class CodeFirstDbContextOptionsBuilderExtensions
     /// <summary>
     /// Replaces EF's migration model differ with <see cref="CodeFirstDatabaseObjectsModelDiffer"/> and the SQL
     /// Server migrations SQL generator with <see cref="CodeFirstDatabaseObjectsMigrationsSqlGenerator"/>, so
-    /// that stored procedures, partition functions and schemes, table placement and clustered columnstore
-    /// indexes declared on the model are diffed into migrations and written as SQL Server accepts them.
+    /// that stored procedures, partition functions and schemes, table placement, clustered columnstore
+    /// indexes and full-text catalogs and indexes declared on the model are diffed into migrations and written
+    /// as SQL Server accepts them.
     /// </summary>
     /// <remarks>
     /// Call it after <c>UseSqlServer(...)</c>. A context that declares procedures and nothing else may keep the

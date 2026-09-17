@@ -14,8 +14,8 @@
   <PropertyGroup Label="Package">
     <IsPackable>true</IsPackable>
     <PackageId>Raptor21.EF.Extensions.Migrations</PackageId>
-    <Description>Folds code-first SQL Server database objects into EF Core migrations: stored procedures as CREATE OR ALTER / DROP operations, partition functions and schemes, tables created on a partition scheme, and clustered columnstore indexes — all declared on the model, carried by the snapshot and diffed by a custom IMigrationsModelDiffer, so they travel in the same migration as the table changes. Targets EF Core 10.</Description>
-    <PackageTags>efcore;migrations;sqlserver;stored-procedure;partitioning;columnstore;code-first;schema</PackageTags>
+    <Description>Folds code-first SQL Server database objects into EF Core migrations: stored procedures as CREATE OR ALTER / DROP operations, partition functions and schemes, tables created on a partition scheme, clustered columnstore indexes, and full-text catalogs and indexes — all declared on the model, carried by the snapshot and diffed by a custom IMigrationsModelDiffer, so they travel in the same migration as the table changes. Targets EF Core 10.</Description>
+    <PackageTags>efcore;migrations;sqlserver;stored-procedure;partitioning;columnstore;full-text;code-first;schema</PackageTags>
   </PropertyGroup>
 
   <!-- The SQL Server provider rather than Relational alone, for one base class:

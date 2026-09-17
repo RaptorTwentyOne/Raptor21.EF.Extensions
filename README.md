@@ -310,6 +310,71 @@ rename) — SQL Server has no `ALTER` for any of those, and moving a
 table means rebuilding its clustered index over the data, which is a migration to write by hand with the
 volume in view. A temporal or memory-optimized table cannot be placed on a scheme through this package.
 
+### A key over a computed column
+
+Not a feature of this package, but the question it gets asked next to `HasNoKey()`: EF refuses a computed
+column in a key because `HasComputedColumnSql` marks it `ValueGeneratedOnAddOrUpdate`, and a key property may
+not have value generation. State `ValueGeneratedNever()` after it and EF keys the column, writes the
+`CONSTRAINT ... PRIMARY KEY` into the `CreateTable` and round-trips the snapshot cleanly — the snapshot is built
+without conventions, so nothing there re-marks the column. The one thing that changes is that EF would send the
+column's value on `Add`, which the engine refuses for a computed column; the shape is for tables written by a
+procedure or a bulk copy and read through EF, such as a rollup table keyed on `ISNULL([VkorgId], 0x0)`:
+
+```csharp
+b.Property(x => x.VkorgKey).HasComputedColumnSql("ISNULL([VkorgId], '00000000-0000-0000-0000-000000000000')", stored: true)
+    .ValueGeneratedNever();
+b.HasKey(x => new { x.Day, x.ClientKind, x.VkorgKey });
+```
+
+---
+
+## Full-text catalogs and indexes
+
+A full-text catalog and a table's full-text index travel the same way: annotations, snapshot, diff, one
+migration. EF has no operation for either, and both are refused inside a transaction by SQL Server (error 574),
+so each statement is emitted as a `Sql(..., suppressTransaction: true)` — EF commits the migration's
+transaction before it and opens a new one after.
+
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.HasFullTextCatalog("ft_Account");                       // CREATE FULLTEXT CATALOG, IF NOT EXISTS
+
+    modelBuilder.Entity<Customer>(b =>
+    {
+        b.HasFullTextIndex("ft_Account", c => new { c.Name, c.Email });  // keyed on the primary key
+    });
+
+    modelBuilder.Entity<Person>(b =>
+    {
+        b.HasIndex(p => p.Code).IsUnique().HasDatabaseName("UX_People_Code");
+        b.HasFullTextIndex(                                              // a language per column, another key
+            "ft_Account",
+            [new FullTextColumn(nameof(Person.Name), language: 1055), new FullTextColumn(nameof(Person.Email))],
+            keyIndex: "UX_People_Code",
+            changeTracking: FullTextChangeTracking.Auto);
+    });
+}
+```
+
+The migration carries `CREATE FULLTEXT CATALOG` ahead of EF's operations and `CREATE FULLTEXT INDEX ON [dbo].[Customers]
+([Name], [Email]) KEY INDEX [PK_Customers] ON [ft_Account] WITH CHANGE_TRACKING AUTO` behind every index EF
+creates — the key index is one of them — and ahead of the procedures, which may `CONTAINS()` over it; `Down`
+drops the index ahead of everything and the catalog last. Both are guarded by `IF [NOT] EXISTS` on
+`sys.fulltext_catalogs` and `sys.fulltext_indexes`, so declaring a catalog the database already has is
+harmless. A changed index — another column, language, catalog, key or tracking mode — is a drop and a create;
+an index whose key index EF drops in the same migration (an `IsClustered(false)` swap on the primary key, a
+rebuilt unique index) is dropped ahead of that and created again behind it, because SQL Server refuses to drop
+an index a full-text index is keyed on. A renamed table keeps its index when the key index name survives the
+rename; keyed on a conventionally named primary key it does not, and the index is rebuilt under the new name.
+
+What the differ refuses at `migrations add`: a catalog that is not declared; a key index that is not a
+primary key, unique constraint or unique index of the table, has more than one column, or is nullable; a
+column that is not a character or xml type — a `varbinary(max)` document column needs a `TYPE COLUMN`, which
+this version does not declare; a property that does not exist or maps to no column of the table. The
+Full-Text Search feature has to be installed on the server (`SERVERPROPERTY('IsFullTextInstalled')`); the
+migration fails on the `CREATE` if it is not, which is the loud failure rather than the silent one.
+
 ---
 
 ## `[Sql]` — overriding the script

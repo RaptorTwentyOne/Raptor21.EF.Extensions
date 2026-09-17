@@ -19,22 +19,25 @@ internal sealed record TablePlacement(TableKey Table, string Scheme, string Prop
 
 /// <summary>
 /// What the entity-level annotations say about the tables of one relational model: which tables sit on a
-/// partition scheme and which carry a clustered columnstore index. Entity annotations are not copied onto
-/// <see cref="ITable"/> by the provider, so this walks each table's entity type mappings to find them.
+/// partition scheme, which carry a clustered columnstore index and which carry a full-text index. Entity
+/// annotations are not copied onto <see cref="ITable"/> by the provider, so this walks each table's entity
+/// type mappings to find them.
 /// </summary>
 internal sealed class CodeFirstTableLayout
 {
-    private static readonly CodeFirstTableLayout EmptyLayout = new(new HashSet<TableKey>(), [], [], []);
+    private static readonly CodeFirstTableLayout EmptyLayout = new(new HashSet<TableKey>(), [], [], [], []);
 
     private CodeFirstTableLayout(
         HashSet<TableKey> tables,
         Dictionary<TableKey, TablePlacement> placements,
         Dictionary<TableKey, ClusteredColumnstoreIndexDefinition> columnstore,
+        Dictionary<TableKey, FullTextIndexDefinition> fullText,
         Dictionary<TableKey, IReadOnlySet<string>> entityTypeNames)
     {
         Tables = tables;
         Placements = placements;
         Columnstore = columnstore;
+        FullText = fullText;
         EntityTypeNames = entityTypeNames;
     }
 
@@ -46,6 +49,9 @@ internal sealed class CodeFirstTableLayout
 
     /// <summary>The tables carrying a clustered columnstore index.</summary>
     public IReadOnlyDictionary<TableKey, ClusteredColumnstoreIndexDefinition> Columnstore { get; }
+
+    /// <summary>The tables carrying a full-text index, resolved to column names and a key index name.</summary>
+    public IReadOnlyDictionary<TableKey, FullTextIndexDefinition> FullText { get; }
 
     /// <summary>
     /// The names of the entity types mapped to each table. EF matches a source table to a target table
@@ -67,6 +73,7 @@ internal sealed class CodeFirstTableLayout
         var tables = new HashSet<TableKey>();
         var placements = new Dictionary<TableKey, TablePlacement>();
         var columnstore = new Dictionary<TableKey, ClusteredColumnstoreIndexDefinition>();
+        var fullText = new Dictionary<TableKey, FullTextIndexDefinition>();
         var entityTypeNames = new Dictionary<TableKey, IReadOnlySet<string>>();
 
         foreach (var table in model.Tables)
@@ -109,10 +116,20 @@ internal sealed class CodeFirstTableLayout
                             "once, on the root type.");
                     columnstore[key] = definition;
                 }
+
+                if (entityType[CodeFirstAnnotations.FullTextIndex] is string serialized)
+                {
+                    var definition = ResolveFullText(table, key, entityType, serialized);
+                    if (fullText.TryGetValue(key, out var existing) && existing != definition)
+                        throw new InvalidOperationException(
+                            $"Table '{key}' declares one full-text index on one entity type and a different one on " +
+                            $"'{entityType.DisplayName()}'. A table has one full-text index; declare it once, on the root type.");
+                    fullText[key] = definition;
+                }
             }
         }
 
-        return new CodeFirstTableLayout(tables, placements, columnstore, entityTypeNames);
+        return new CodeFirstTableLayout(tables, placements, columnstore, fullText, entityTypeNames);
     }
 
     /// <summary>
@@ -121,7 +138,7 @@ internal sealed class CodeFirstTableLayout
     /// Server error number.
     /// </summary>
     /// <exception cref="InvalidOperationException">A declaration refers to something undeclared, or two declarations cannot coexist.</exception>
-    public void Validate(IRelationalModel model, PartitionLayout partitions)
+    public void Validate(IRelationalModel model, PartitionLayout partitions, FullTextLayout fullTextCatalogs)
     {
         foreach (var scheme in partitions.Schemes.Values)
         {
@@ -136,6 +153,7 @@ internal sealed class CodeFirstTableLayout
             var key = TableKey.Of(table);
             Placements.TryGetValue(key, out var placement);
             Columnstore.TryGetValue(key, out var columnstore);
+            FullText.TryGetValue(key, out var fullText);
 
             if (placement is not null)
             {
@@ -149,7 +167,77 @@ internal sealed class CodeFirstTableLayout
 
             if (columnstore is not null)
                 ValidateNoOtherClusteredIndex(table, key, columnstore);
+
+            if (fullText is not null)
+                ValidateFullText(table, key, fullText, fullTextCatalogs);
         }
+    }
+
+    // Everything SQL Server would refuse at CREATE FULLTEXT INDEX, refused here at migrations add instead: the
+    // catalog must exist (error 7642), the key index must be unique, single-column and non-nullable (7653,
+    // 7654), and each column must be a character or xml type (7670 — a varbinary(max) or image column can be
+    // indexed too, but only with a TYPE COLUMN naming the document's extension, which this version does not
+    // declare).
+    private static void ValidateFullText(ITable table, TableKey key, FullTextIndexDefinition fullText, FullTextLayout catalogs)
+    {
+        if (!catalogs.Catalogs.Contains(fullText.Catalog))
+            throw new InvalidOperationException(
+                $"Table '{key}' declares a full-text index on catalog '{fullText.Catalog}', which is not declared. " +
+                $"Call modelBuilder.HasFullTextCatalog(\"{fullText.Catalog}\") or correct the name in HasFullTextIndex.");
+
+        var keyColumns = KeyIndexColumns(table, fullText.KeyIndex)
+            ?? throw new InvalidOperationException(
+                $"Table '{key}' declares a full-text index keyed on '{fullText.KeyIndex}', which is not a primary key, unique " +
+                "constraint or unique index of the table. Name one with the keyIndex argument of HasFullTextIndex, or leave " +
+                "it out to use the primary key.");
+
+        if (keyColumns.Count != 1)
+            throw new InvalidOperationException(
+                $"Table '{key}' declares a full-text index keyed on '{fullText.KeyIndex}', which has {keyColumns.Count} columns. " +
+                "SQL Server keys a full-text index on a single-column unique index; add one and name it with the keyIndex " +
+                "argument of HasFullTextIndex.");
+
+        if (keyColumns[0].IsNullable)
+            throw new InvalidOperationException(
+                $"Table '{key}' declares a full-text index keyed on '{fullText.KeyIndex}', whose column '{keyColumns[0].Name}' is " +
+                "nullable. SQL Server keys a full-text index on a non-nullable column; make it required or key on another index.");
+
+        foreach (var column in fullText.Columns)
+        {
+            var storeType = table.Columns.First(c => string.Equals(c.Name, column.Name, StringComparison.OrdinalIgnoreCase)).StoreType;
+            var baseType = storeType.Split('(')[0].Trim().ToLowerInvariant();
+            if (baseType is "char" or "nchar" or "varchar" or "nvarchar" or "text" or "ntext" or "xml")
+                continue;
+
+            var hint = baseType is "varbinary" or "image"
+                ? "a binary column needs a TYPE COLUMN naming each document's extension, which this package does not declare"
+                : "SQL Server full-text indexes character and xml columns";
+            throw new InvalidOperationException(
+                $"Table '{key}' declares a full-text index over column '{column.Name}' of type '{storeType}'; {hint}. " +
+                "Remove the column from HasFullTextIndex.");
+        }
+    }
+
+    private static IReadOnlyList<IColumn>? KeyIndexColumns(ITable table, string keyIndex)
+    {
+        if (table.PrimaryKey is { } primaryKey && Named(primaryKey.Name))
+            return primaryKey.Columns;
+
+        foreach (var constraint in table.UniqueConstraints)
+        {
+            if (Named(constraint.Name))
+                return constraint.Columns;
+        }
+
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsUnique && Named(index.Name))
+                return index.Columns;
+        }
+
+        return null;
+
+        bool Named(string name) => string.Equals(name, keyIndex, StringComparison.OrdinalIgnoreCase);
     }
 
     // SQL Server requires the partitioning column in the key of every unique index aligned to the scheme
@@ -243,6 +331,47 @@ internal sealed class CodeFirstTableLayout
                 "The partitioning column must be one of the table's own columns.");
 
         return new TablePlacement(key, scheme.Trim(), propertyName.Trim(), column);
+    }
+
+    // Property names become column names here, and an absent key index becomes the primary key's name — the
+    // one point where the declaration and the table it describes are both in hand. The snapshot side goes
+    // through the same resolution, so a renamed column diffs as a changed index rather than as noise.
+    private static FullTextIndexDefinition ResolveFullText(ITable table, TableKey key, IEntityType entityType, string serialized)
+    {
+        FullTextIndexDeclaration declaration;
+        try
+        {
+            declaration = FullTextIndexDeclaration.Parse(serialized);
+        }
+        catch (FormatException ex)
+        {
+            throw new InvalidOperationException($"Table '{key}': {ex.Message}", ex);
+        }
+
+        var storeObject = StoreObjectIdentifier.Table(table.Name, table.Schema);
+        var columns = new List<FullTextColumn>(declaration.Columns.Count);
+        foreach (var column in declaration.Columns)
+        {
+            var property = entityType.FindProperty(column.Name)
+                ?? throw new InvalidOperationException(
+                    $"Table '{key}' declares a full-text index over property '{column.Name}', which '{entityType.DisplayName()}' does not have. " +
+                    "Name mapped properties of the entity in HasFullTextIndex.");
+
+            var columnName = property.GetColumnName(storeObject)
+                ?? throw new InvalidOperationException(
+                    $"Table '{key}' declares a full-text index over property '{column.Name}', which maps to no column of that table. " +
+                    "A full-text column must be one of the table's own columns.");
+
+            columns.Add(new FullTextColumn(columnName, column.Language));
+        }
+
+        var keyIndex = declaration.KeyIndex
+            ?? table.PrimaryKey?.Name
+            ?? throw new InvalidOperationException(
+                $"Table '{key}' declares a full-text index keyed on its primary key, and has none. Declare a key with HasKey, " +
+                "or name a unique single-column index with the keyIndex argument of HasFullTextIndex.");
+
+        return new FullTextIndexDefinition(table.Schema, table.Name, declaration.Catalog, keyIndex, declaration.ChangeTracking, columns);
     }
 
     private static bool Contains(IReadOnlyList<IColumn> columns, string column)

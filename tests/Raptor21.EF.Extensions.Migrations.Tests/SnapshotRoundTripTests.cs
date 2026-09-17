@@ -45,6 +45,10 @@ public class SnapshotRoundTripTests
         Assert.Contains(".HasAnnotation(\"Raptor21:Partition:Scheme\", \"ps_Events\")", snapshot, StringComparison.Ordinal);
         Assert.Contains(".HasAnnotation(\"Raptor21:Partition:Column\", \"OccurredAt\")", snapshot, StringComparison.Ordinal);
         Assert.Contains(".HasAnnotation(\"Raptor21:ClusteredColumnstoreIndex\", \"cci_Events\")", snapshot, StringComparison.Ordinal);
+
+        // Full-text: the catalog on the model, the index on the entity — property names, key index and tracking.
+        Assert.Contains(".HasAnnotation(\"Raptor21:FullTextCatalog:ft_Account\", \"v1\")", snapshot, StringComparison.Ordinal);
+        Assert.Contains(".HasAnnotation(\"Raptor21:FullTextIndex\", \"v1|ft_Account||AUTO|Name:1055,Email\")", snapshot, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -91,6 +95,13 @@ public class SnapshotRoundTripTests
             events.HasIndex(e => e.Kind);
             events.OnPartitionScheme("ps_Events", e => e.OccurredAt);
             events.HasClusteredColumnstoreIndex("cci_Events");
+
+            modelBuilder.HasFullTextCatalog("ft_Account");
+            var customers = modelBuilder.Entity<Customer>();
+            customers.ToTable("Customers");
+            customers.Property(c => c.Name).HasColumnType("nvarchar(200)");
+            customers.Property(c => c.Email).HasColumnType("nvarchar(254)");
+            customers.HasFullTextIndex("ft_Account", [new FullTextColumn("Name", 1055), new FullTextColumn("Email")]);
         }
     }
 
@@ -103,7 +114,8 @@ public class SnapshotRoundTripTests
             modelBuilder
                 .HasDefaultSchema("dbo")
                 .HasAnnotation("Raptor21:PartitionFunction:pf_EventsMonth", "v1|datetime2(3)|RIGHT|'20260801','20260901'")
-                .HasAnnotation("Raptor21:PartitionScheme:ps_Events", "v1|pf_EventsMonth|PRIMARY");
+                .HasAnnotation("Raptor21:PartitionScheme:ps_Events", "v1|pf_EventsMonth|PRIMARY")
+                .HasAnnotation("Raptor21:FullTextCatalog:ft_Account", "v1");
 
             modelBuilder.Entity<Event>(b =>
             {
@@ -115,7 +127,22 @@ public class SnapshotRoundTripTests
                 b.HasAnnotation("Raptor21:Partition:Column", "OccurredAt");
                 b.HasAnnotation("Raptor21:ClusteredColumnstoreIndex", "cci_Events");
             });
+
+            modelBuilder.Entity<Customer>(b =>
+            {
+                b.Property(c => c.Name).HasColumnType("nvarchar(200)");
+                b.Property(c => c.Email).HasColumnType("nvarchar(254)");
+                b.ToTable("Customers", "dbo");
+                b.HasAnnotation("Raptor21:FullTextIndex", "v1|ft_Account||AUTO|Name:1055,Email");
+            });
         }
+    }
+
+    private sealed class Customer
+    {
+        public long Id { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public string? Email { get; set; }
     }
 
     private sealed class Event

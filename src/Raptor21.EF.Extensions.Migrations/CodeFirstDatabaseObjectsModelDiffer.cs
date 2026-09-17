@@ -10,11 +10,12 @@ namespace Raptor21.EF.Extensions.Migrations;
 /// <summary>
 /// Extends EF Core's migration model differ with the code-first database objects this package declares:
 /// stored procedures registered by <see cref="StoredProcedureModelExtensions.RegisterStoredProcedures"/>,
-/// partition functions and schemes, a table's placement on a scheme and clustered columnstore indexes. Each
-/// is diffed against the model snapshot next to EF's own table diff and lands in the same migration, in an
-/// order the database accepts. EF invokes the differ once per direction, so rollback follows from the same
-/// rules. Both entry points are overridden, so a change to any of these objects is reported by
-/// <c>dotnet ef migrations has-pending-model-changes</c> as well as scaffolded by <c>migrations add</c>.
+/// partition functions and schemes, a table's placement on a scheme, clustered columnstore indexes, and
+/// full-text catalogs and indexes. Each is diffed against the model snapshot next to EF's own table diff and
+/// lands in the same migration, in an order the database accepts. EF invokes the differ once per direction,
+/// so rollback follows from the same rules. Both entry points are overridden, so a change to any of these
+/// objects is reported by <c>dotnet ef migrations has-pending-model-changes</c> as well as scaffolded by
+/// <c>migrations add</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -25,11 +26,15 @@ namespace Raptor21.EF.Extensions.Migrations;
 /// </para>
 /// <para>
 /// The operation order is: partition function creates, partition scheme creates, boundary merges and splits,
-/// columnstore drops, EF's operations — each <c>CreateTableOperation</c> for a placed table annotated with its
-/// scheme and column, a placed table's columnstore index immediately behind its <c>CREATE TABLE</c> so that
-/// every nonclustered index EF creates afterwards is built over it, and an existing table's new columnstore
-/// inserted before the first index this migration adds to that table — remaining columnstore creates and
-/// renames on tables that already exist, procedures, scheme drops, function drops.
+/// full-text catalog creates, full-text index drops, columnstore drops, EF's operations — each
+/// <c>CreateTableOperation</c> for a placed table annotated with its scheme and column, a placed table's
+/// columnstore index immediately behind its <c>CREATE TABLE</c> so that every nonclustered index EF creates
+/// afterwards is built over it, and an existing table's new columnstore inserted before the first index this
+/// migration adds to that table — remaining columnstore creates and renames on tables that already exist,
+/// full-text index creates (after every index, because the key index must exist), procedures, full-text
+/// catalog drops, scheme drops, function drops. Every full-text statement is marked transaction-suppressed,
+/// because SQL Server refuses full-text DDL inside a user transaction (error 574); EF commits the migration's
+/// transaction before such a statement and opens a new one after it.
 /// </para>
 /// <para>
 /// Subclassing <see cref="MigrationsModelDiffer"/> requires forwarding its internal-flagged dependencies; EF1001
@@ -91,6 +96,26 @@ public class CodeFirstDatabaseObjectsModelDiffer : MigrationsModelDiffer
             if (!op.IsDrop)
                 operations.Add(Sql(op.Sql));
         }
+
+        foreach (var op in plan.FullText)
+        {
+            if (op.Kind == FullTextOpKind.CreateCatalog)
+                operations.Add(Sql(op.Sql, suppressTransaction: true));
+        }
+
+        // Full-text index drops run before EF's operations — and before the columnstore drops, which never
+        // touch a full-text index but come next by convention — because an ALTER COLUMN on a full-text column
+        // and a DROP INDEX of the key index are both refused while the full-text index stands (errors 7614 and
+        // 3723). Rebuilt indexes below are dropped here as well.
+        var rebuilt = RebuiltByKeyIndexDrop(tableOperations, plan);
+        foreach (var op in plan.FullText)
+        {
+            if (op.Kind == FullTextOpKind.DropIndex)
+                operations.Add(Sql(op.Sql, suppressTransaction: true));
+        }
+
+        foreach (var definition in rebuilt)
+            operations.Add(Sql(FullTextDiff.DropIndex(definition).Sql, suppressTransaction: true));
 
         // Columnstore drops run before EF's operations. The direction that removes a live table's columnstore
         // is the direction that may re-create a clustered primary key — the Down of "give this table a
@@ -155,9 +180,28 @@ public class CodeFirstDatabaseObjectsModelDiffer : MigrationsModelDiffer
                 operations.Add(Sql(op.Sql));
         }
 
+        // Full-text index creates come after every index EF creates — the key index among them — and before
+        // the procedures, because a procedure that reads the table with CONTAINS binds against the full-text
+        // index at creation when the table already exists.
+        foreach (var op in plan.FullText)
+        {
+            if (op.Kind == FullTextOpKind.CreateIndex)
+                operations.Add(Sql(op.Sql, suppressTransaction: true));
+        }
+
+        foreach (var definition in rebuilt)
+            operations.Add(Sql(FullTextDiff.CreateIndex(definition).Sql, suppressTransaction: true));
+
         // Procedure operations run after table operations (a procedure may reference tables).
         foreach (var op in plan.Procedures)
             operations.Add(Sql(op.Sql));
+
+        // A catalog is dropped after every index that lived in it, which the drops above have already done.
+        foreach (var op in plan.FullText)
+        {
+            if (op.Kind == FullTextOpKind.DropCatalog)
+                operations.Add(Sql(op.Sql, suppressTransaction: true));
+        }
 
         // Schemes before functions, and both after every table that sat on them has been dropped: Compute
         // already orders the drops that way.
@@ -168,6 +212,50 @@ public class CodeFirstDatabaseObjectsModelDiffer : MigrationsModelDiffer
         }
 
         return operations;
+    }
+
+    // A full-text index whose declaration did not change can still need a rebuild: when EF drops the index it
+    // is keyed on — a DropPrimaryKey for an IsClustered(false) swap, a DropUniqueConstraint, a DropIndex to
+    // re-create the index with other columns — SQL Server refuses that drop while the full-text index is keyed
+    // on it (error 3723). Such an index is dropped ahead of EF's operations and created again behind them.
+    // Only GetDifferences can see EF's operations, and only a model EF already finds different reaches here,
+    // so HasDifferences answers true in every case this adds an operation to.
+    private static List<FullTextIndexDefinition> RebuiltByKeyIndexDrop(IReadOnlyList<MigrationOperation> tableOperations, Plan plan)
+    {
+        var rebuilt = new List<FullTextIndexDefinition>();
+        if (plan.FullTextTargets.Count == 0)
+            return rebuilt;
+
+        var alreadyCreated = new HashSet<string>(
+            plan.FullText.Where(o => o.Kind == FullTextOpKind.CreateIndex).Select(o => o.Name),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (key, definition) in plan.FullTextTargets)
+        {
+            if (alreadyCreated.Contains(key.ToString()))
+                continue;
+
+            if (tableOperations.Any(o => DropsKeyIndex(o, key, definition.KeyIndex)))
+                rebuilt.Add(definition);
+        }
+
+        return rebuilt;
+    }
+
+    private static bool DropsKeyIndex(MigrationOperation operation, TableKey table, string keyIndex)
+    {
+        var (schema, name, dropped) = operation switch
+        {
+            DropPrimaryKeyOperation op => (op.Schema, op.Table, op.Name),
+            DropUniqueConstraintOperation op => (op.Schema, op.Table, op.Name),
+            DropIndexOperation op => (op.Schema, op.Table, op.Name),
+            _ => (null, null, null),
+        };
+
+        return dropped is not null
+               && string.Equals(schema, table.Schema, StringComparison.OrdinalIgnoreCase)
+               && string.Equals(name, table.Name, StringComparison.OrdinalIgnoreCase)
+               && string.Equals(dropped, keyIndex, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -213,12 +301,14 @@ public class CodeFirstDatabaseObjectsModelDiffer : MigrationsModelDiffer
     {
         var sourcePartitions = PartitionLayout.FromModel(source?.Model);
         var targetPartitions = PartitionLayout.FromModel(target?.Model);
+        var sourceCatalogs = FullTextLayout.FromModel(source?.Model);
+        var targetCatalogs = FullTextLayout.FromModel(target?.Model);
         var sourceTables = CodeFirstTableLayout.Read(source);
         var targetTables = CodeFirstTableLayout.Read(target);
 
         if (target is not null)
         {
-            targetTables.Validate(target, targetPartitions);
+            targetTables.Validate(target, targetPartitions, targetCatalogs);
             RequireGeneratorFor(targetTables);
         }
 
@@ -238,11 +328,17 @@ public class CodeFirstDatabaseObjectsModelDiffer : MigrationsModelDiffer
             SurvivingColumnstore(sourceTables, targetTables, tableMap),
             targetTables.Columnstore.Values);
 
+        var fullText = FullTextDiff.Compute(
+            sourceCatalogs,
+            targetCatalogs,
+            SurvivingFullText(sourceTables, targetTables, tableMap),
+            targetTables.FullText.Values);
+
         var procedures = StoredProcedureDiff.Compute(
             StoredProcedureModelExtensions.GetStoredProcedureScripts(source?.Model),
             StoredProcedureModelExtensions.GetStoredProcedureScripts(target?.Model));
 
-        return new Plan(partition, columnstore, procedures, targetTables.Placements);
+        return new Plan(partition, columnstore, fullText, procedures, targetTables.Placements, targetTables.FullText);
     }
 
     private void RequireGeneratorFor(CodeFirstTableLayout targetTables)
@@ -323,6 +419,34 @@ public class CodeFirstDatabaseObjectsModelDiffer : MigrationsModelDiffer
         }
     }
 
+    // The source side of the full-text diff. A dropped table takes its index along, as with the columnstore.
+    // A renamed table is different from the columnstore case in one respect: a changed full-text index is a
+    // DROP and a CREATE, and the DROP runs before the RenameTableOperation while the CREATE runs after it, so
+    // the two must name different tables. The definition is therefore translated to the new identity only
+    // when the target declares the same index there — where it reads as unchanged and produces nothing — and
+    // kept under its old identity otherwise, where the diff reads the old table as losing its index and the
+    // new one as gaining it, which is exactly the two statements in the order the rename needs. A key index
+    // that follows EF's naming convention changes with the table name, so an index keyed on the primary key
+    // takes this route on every rename; one keyed on an explicitly named unique index does not.
+    private static IEnumerable<FullTextIndexDefinition> SurvivingFullText(
+        CodeFirstTableLayout sourceTables,
+        CodeFirstTableLayout targetTables,
+        IReadOnlyDictionary<TableKey, TableKey> tableMap)
+    {
+        foreach (var (key, definition) in sourceTables.FullText)
+        {
+            if (!tableMap.TryGetValue(key, out var targetKey))
+                continue;
+
+            if (targetKey != key
+                && targetTables.FullText.TryGetValue(targetKey, out var renamed)
+                && string.Equals(renamed.Signature, definition.Signature, StringComparison.Ordinal))
+                yield return definition with { Schema = targetKey.Schema, Table = targetKey.Name };
+            else
+                yield return definition;
+        }
+    }
+
     private static void RefusePlacementChanges(
         CodeFirstTableLayout sourceTables,
         CodeFirstTableLayout targetTables,
@@ -362,16 +486,19 @@ public class CodeFirstDatabaseObjectsModelDiffer : MigrationsModelDiffer
             => placement is null ? "no partition scheme" : $"partition scheme '{placement.Scheme}' by column '{placement.Column}'";
     }
 
-    private static SqlOperation Sql(string sql) => new() { Sql = sql };
+    private static SqlOperation Sql(string sql, bool suppressTransaction = false)
+        => new() { Sql = sql, SuppressTransaction = suppressTransaction };
 }
 
 /// <summary>Everything this package adds to one diff, computed once and read by both entry points.</summary>
 internal sealed record Plan(
     IReadOnlyList<PartitionOp> Partition,
     IReadOnlyList<ColumnstoreOp> Columnstore,
+    IReadOnlyList<FullTextOp> FullText,
     IReadOnlyList<ProcOp> Procedures,
-    IReadOnlyDictionary<TableKey, TablePlacement> Placements)
+    IReadOnlyDictionary<TableKey, TablePlacement> Placements,
+    IReadOnlyDictionary<TableKey, FullTextIndexDefinition> FullTextTargets)
 {
     /// <summary>The number of operations this package will add to the migration. Placements add annotations, not operations.</summary>
-    public int Count => Partition.Count + Columnstore.Count + Procedures.Count;
+    public int Count => Partition.Count + Columnstore.Count + FullText.Count + Procedures.Count;
 }

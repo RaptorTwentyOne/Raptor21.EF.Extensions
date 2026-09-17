@@ -25,7 +25,7 @@ surface is not a compatibility commitment.
   nuget.org trusted publishing (OIDC).
 
 
-- 621 tests across the three suites — 285 over the runtime library, 157 over the migration package, 179
+- 674 tests across the three suites — 285 over the runtime library, 210 over the migration package, 179
   over the generator — and not one needs a SQL Server, a network or the file system. Ten pure statics
   sit behind the runtime library's `InternalsVisibleTo` to make that possible: eight widened from
   `private`, and two lifted out of loops that had been written inline. No existing public signature was
@@ -222,6 +222,22 @@ surface is not a compatibility commitment.
   model, and the annotation keys live in `CodeFirstAnnotations`. The serialized forms are versioned
   (`v1|datetime2(3)|RIGHT|'20260801','20260901'`, `v1|pf_EventsMonth|PRIMARY`) so a later format can be
   read next to this one instead of invalidating every snapshot already checked in.
+- **Full-text catalogs and indexes are code-first.** `modelBuilder.HasFullTextCatalog("ft_Account")` and
+  `entity.HasFullTextIndex("ft_Account", c => new { c.Name, c.Email }, keyIndex: null, changeTracking: Auto)`
+  — or the `FullTextColumn` overload for a per-column word-breaker language and shadow properties — put the
+  declarations on the model, the snapshot carries them (`Raptor21:FullTextCatalog:<name>` = `v1`,
+  `Raptor21:FullTextIndex` = `v1|ft_Account||AUTO|Name:1055,Email`), and the differ emits `CREATE FULLTEXT
+  CATALOG` ahead of EF's operations and `CREATE FULLTEXT INDEX ... KEY INDEX ... ON ... WITH CHANGE_TRACKING`
+  behind every index EF creates and ahead of the procedures; `Down` drops the index first and the catalog
+  last. Every full-text statement is a `Sql(..., suppressTransaction: true)`, because SQL Server refuses
+  full-text DDL inside a user transaction and a migration runs in one. A changed index is a drop and a create;
+  an index whose key index EF drops in the same migration is dropped ahead of that drop and created again
+  behind the re-add, which the declaration diff alone could not see. Refused at `migrations add`: an
+  undeclared catalog; a key index that is not unique, not single-column or nullable; a column that is not
+  character or xml; an unmapped property. `FullTextDiff.Compute` and `FullTextLayout.FromModel` are the
+  public pure halves, like the other three.
+- `README` — the `ValueGeneratedNever()` shape for a key over a computed column, next to the columnstore
+  section, because it is the question `HasNoKey()` raises next and it is EF's own answer, not this package's.
 
 ### Changed
 

@@ -153,13 +153,83 @@ public static class CodeFirstModelBuilderExtensions
         return entityTypeBuilder;
     }
 
+    /// <summary>
+    /// Declares a full-text catalog: <c>CREATE FULLTEXT CATALOG [name]</c>, guarded by <c>IF NOT EXISTS</c>, so
+    /// declaring a catalog the database already has is harmless. Every <see cref="HasFullTextIndex{TEntity}(EntityTypeBuilder{TEntity}, string, Expression{Func{TEntity, object?}}, string?, FullTextChangeTracking)"/>
+    /// names a declared catalog; the differ refuses one that is not.
+    /// </summary>
+    /// <param name="modelBuilder">The model builder.</param>
+    /// <param name="name">The catalog name.</param>
+    public static ModelBuilder HasFullTextCatalog(this ModelBuilder modelBuilder, string name)
+    {
+        ArgumentNullException.ThrowIfNull(modelBuilder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        if (name.Contains('|'))
+            throw new ArgumentException($"'{name}' contains '|', which the serialized form uses as its separator.", nameof(name));
+
+        modelBuilder.HasAnnotation(CodeFirstAnnotations.FullTextCatalogPrefix + name.Trim(), "v1");
+        return modelBuilder;
+    }
+
+    /// <summary>
+    /// Creates a full-text index on the entity's table over the given properties:
+    /// <c>CREATE FULLTEXT INDEX ON [table] ([col], ...) KEY INDEX [key] ON [catalog] WITH CHANGE_TRACKING AUTO</c>,
+    /// emitted after every index the migration creates on the table, outside the migration's transaction as
+    /// SQL Server requires. The columns take the server's default word-breaker language; use the
+    /// <see cref="FullTextColumn"/> overload to set one per column.
+    /// </summary>
+    /// <param name="entityTypeBuilder">The entity type builder.</param>
+    /// <param name="catalog">A catalog declared with <see cref="HasFullTextCatalog"/>.</param>
+    /// <param name="columns">One property (<c>c => c.Name</c>) or several (<c>c => new { c.Name, c.Email }</c>); character or xml columns only.</param>
+    /// <param name="keyIndex">
+    /// The name of the unique, single-column, non-nullable index the full-text index is keyed on;
+    /// <see langword="null"/> for the primary key, which must then be a single column.
+    /// </param>
+    /// <param name="changeTracking">How the index is kept current; <see cref="FullTextChangeTracking.Auto"/> unless said otherwise.</param>
+    public static EntityTypeBuilder<TEntity> HasFullTextIndex<TEntity>(
+        this EntityTypeBuilder<TEntity> entityTypeBuilder,
+        string catalog,
+        Expression<Func<TEntity, object?>> columns,
+        string? keyIndex = null,
+        FullTextChangeTracking changeTracking = FullTextChangeTracking.Auto)
+        where TEntity : class
+    {
+        ArgumentNullException.ThrowIfNull(columns);
+        return HasFullTextIndex(
+            entityTypeBuilder, catalog, PropertyNames(columns).Select(n => new FullTextColumn(n)), keyIndex, changeTracking);
+    }
+
+    /// <summary>
+    /// Creates a full-text index on the entity's table over the given columns, each named by its
+    /// <em>property</em> and optionally carrying its word-breaker language as an LCID — the overload for a
+    /// shadow property or a column whose language is not the server default.
+    /// </summary>
+    /// <inheritdoc cref="HasFullTextIndex{TEntity}(EntityTypeBuilder{TEntity}, string, Expression{Func{TEntity, object?}}, string?, FullTextChangeTracking)"/>
+    public static EntityTypeBuilder<TEntity> HasFullTextIndex<TEntity>(
+        this EntityTypeBuilder<TEntity> entityTypeBuilder,
+        string catalog,
+        IEnumerable<FullTextColumn> columns,
+        string? keyIndex = null,
+        FullTextChangeTracking changeTracking = FullTextChangeTracking.Auto)
+        where TEntity : class
+    {
+        ArgumentNullException.ThrowIfNull(entityTypeBuilder);
+        ArgumentNullException.ThrowIfNull(columns);
+
+        // PROPERTY names, like the partition column: the snapshot can express them and the differ translates
+        // them to column names once it has the table. The key index is a database name already — it is the
+        // name EF gives the index, which a HasDatabaseName on the index changes, and the snapshot carries that.
+        var declaration = new FullTextIndexDeclaration(catalog, columns.ToList(), keyIndex, changeTracking);
+        entityTypeBuilder.HasAnnotation(CodeFirstAnnotations.FullTextIndex, declaration.Serialize());
+        return entityTypeBuilder;
+    }
+
     // `e => e.OccurredAt` arrives as a MemberExpression; a value-typed member arrives boxed, as
     // Convert(MemberExpression), because the lambda's return type is object?.
     private static string PropertyName<TEntity>(Expression<Func<TEntity, object?>> column)
     {
-        var body = column.Body is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } unary
-            ? unary.Operand
-            : column.Body;
+        var body = Unbox(column.Body);
 
         if (body is MemberExpression { Member: PropertyInfo or FieldInfo, Expression: ParameterExpression } member)
             return member.Member.Name;
@@ -168,4 +238,27 @@ public static class CodeFirstModelBuilderExtensions
             $"The partition column must be a single property access such as 'e => e.OccurredAt'; '{column}' is not one.",
             nameof(column));
     }
+
+    // `c => c.Name` or `c => new { c.Name, c.Email }` — the two shapes EF's own HasIndex accepts.
+    private static IReadOnlyList<string> PropertyNames<TEntity>(Expression<Func<TEntity, object?>> columns)
+    {
+        var body = Unbox(columns.Body);
+
+        if (body is MemberExpression { Member: PropertyInfo or FieldInfo, Expression: ParameterExpression } member)
+            return [member.Member.Name];
+
+        if (body is NewExpression { Arguments.Count: > 0 } anonymous
+            && anonymous.Arguments.All(a => Unbox(a) is MemberExpression { Member: PropertyInfo or FieldInfo, Expression: ParameterExpression }))
+            return anonymous.Arguments.Select(a => ((MemberExpression)Unbox(a)).Member.Name).ToList();
+
+        throw new ArgumentException(
+            $"The full-text columns must be a property access such as 'c => c.Name' or an anonymous object of them such as " +
+            $"'c => new {{ c.Name, c.Email }}'; '{columns}' is neither.",
+            nameof(columns));
+    }
+
+    private static Expression Unbox(Expression expression)
+        => expression is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } unary
+            ? unary.Operand
+            : expression;
 }

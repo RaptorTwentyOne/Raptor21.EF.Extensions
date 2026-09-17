@@ -42,4 +42,17 @@ public static class CodeFirstAnnotations
 
     /// <summary>Entity-level: the name of the clustered columnstore index created on the entity's table.</summary>
     public const string ClusteredColumnstoreIndex = "Raptor21:ClusteredColumnstoreIndex";
+
+    /// <summary>
+    /// Model-level prefix. <c>Raptor21:FullTextCatalog:&lt;name&gt;</c> declares a full-text catalog; the value is
+    /// the format version, <c>v1</c>, because a catalog has nothing else to say about itself here.
+    /// </summary>
+    public const string FullTextCatalogPrefix = "Raptor21:FullTextCatalog:";
+
+    /// <summary>
+    /// Entity-level: a <see cref="FullTextIndexDeclaration"/> serialized with
+    /// <see cref="FullTextIndexDeclaration.Serialize"/> — the catalog, the <em>property</em> names indexed, the key
+    /// index and the change tracking. Property names, for the same reason as <see cref="PartitionColumn"/>.
+    /// </summary>
+    public const string FullTextIndex = "Raptor21:FullTextIndex";
 }
