@@ -1,5 +1,4 @@
 using System.Reflection;
-using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 
@@ -20,29 +19,12 @@ public static class StoredProcedureModelExtensions
         ArgumentNullException.ThrowIfNull(assembly);
         ArgumentException.ThrowIfNullOrWhiteSpace(resourcePrefix);
 
-        var prefix = resourcePrefix.TrimEnd('.') + ".";
-
         // Which resource claimed each procedure name, so a collision can name BOTH files. Naming only the
         // loser leaves the developer hunting for the one it collided with.
         var origins = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var resourceName in assembly.GetManifestResourceNames())
+        foreach (var (resourceName, scriptName, sql) in EmbeddedScripts.Read(assembly, resourcePrefix))
         {
-            if (!resourceName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-                || !resourceName.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            // GetManifestResourceStream is documented to return null, and the assembly is a caller-supplied
-            // parameter, so the null-forgiving operator that used to stand here turned a reachable failure
-            // into a NullReferenceException from inside StreamReader - a message naming neither the
-            // resource nor where it came from, thrown from the one method whose job is loading resources.
-            using var stream = assembly.GetManifestResourceStream(resourceName)
-                ?? throw new InvalidOperationException(
-                    $"Embedded resource '{resourceName}' is listed by assembly '{assembly.FullName}' but has no stream.");
-            using var reader = new StreamReader(stream, Encoding.UTF8);
-            var sql = reader.ReadToEnd();
-
-            var scriptName = resourceName[prefix.Length..];
             var qualifiedName = StoredProcedureScript.ParseQualifiedName(sql, scriptName);
 
             // The annotation key is the procedure's qualified name, not the file's, so two .sql files that

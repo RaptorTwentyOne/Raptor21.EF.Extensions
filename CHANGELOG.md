@@ -25,7 +25,7 @@ surface is not a compatibility commitment.
   nuget.org trusted publishing (OIDC).
 
 
-- 677 tests across the three suites — 285 over the runtime library, 213 over the migration package, 179
+- 738 tests across the three suites — 285 over the runtime library, 274 over the migration package, 179
   over the generator — and not one needs a SQL Server, a network or the file system. Ten pure statics
   sit behind the runtime library's `InternalsVisibleTo` to make that possible: eight widened from
   `private`, and two lifted out of loops that had been written inline. No existing public signature was
@@ -244,6 +244,30 @@ surface is not a compatibility commitment.
   and `CodeFirstDatabaseObjectsMigrationsSqlGenerator` sets the flag back from it when the migration runs.
   A full-text declaration therefore needs the generator half, and the differ refuses one under the old
   single `ReplaceService<IMigrationsModelDiffer, ...>()` the way it refuses a placed table.
+- **User-defined functions are code-first.** `modelBuilder.RegisterDatabaseScripts(assembly, "MyApp.DbScripts")`
+  reads one folder holding procedures and functions, classifies each `.sql` by its header and records it as a
+  model annotation — `Sp:schema.name` for a `CREATE OR ALTER PROCEDURE`, exactly what `RegisterStoredProcedures`
+  writes, and `Fn:schema.name` for a `CREATE OR ALTER FUNCTION`. Anything else is refused naming the file, and
+  so are two scripts declaring one object, a procedure and a function of the same name included, because SQL
+  Server keeps both in one namespace. `FunctionDiff.Compute` is the pure half: a new or edited function is
+  `EXEC(N'CREATE OR ALTER FUNCTION ...')`, a removed one `DROP FUNCTION IF EXISTS`, and a change of kind —
+  scalar, inline or multi-statement table-valued, read from the `RETURNS` clause by `FunctionScript.DetectKind`
+  with comments and literals stepped over — is one `FunctionOpKind.Recreate` statement, drop then create,
+  because `CREATE OR ALTER` refuses to change a function's kind. The differ creates and alters functions after
+  every table and index and before the procedures, and drops them after the procedures; `HasDifferences` sees
+  a function-only edit through the same `Plan` as `GetDifferences`. `RegisterStoredProcedures` is unchanged.
+- **A script may state the module's `ANSI_NULLS` and `QUOTED_IDENTIFIER`.** SQL Server records both on a
+  procedure or function at creation and applies them on every run, so a legacy module created with either
+  `OFF` behaves differently from the same text created through a client connection, which has both `ON`.
+  `ModuleScriptPreamble.Parse` splits `SET ANSI_NULLS ON|OFF` / `SET QUOTED_IDENTIFIER ON|OFF` statements at
+  the very start of a script from the module text, which it keeps byte for byte, and `WrapInExec` then nests
+  the module: `EXEC(N'SET ANSI_NULLS OFF; SET QUOTED_IDENTIFIER OFF; EXEC(N''CREATE OR ALTER ...'')');`.
+  Nesting is what makes it work: `QUOTED_IDENTIFIER` is a parse-time option, so a `SET` in front of the `EXEC`
+  in the same batch is overridden by any restoring `SET` after it, while inside the outer dynamic batch the
+  options hold when the inner one is parsed, and SQL Server restores the caller's options when the dynamic
+  batch ends. Driven against SQL Server 2022: `sys.sql_modules` records 0 for both, inside a transaction and
+  inside `IF ... BEGIN ... END`, and the session's own options are untouched afterwards. A script with no
+  preamble is wrapped byte for byte as before, so no existing migration changes.
 - `README` — the `ValueGeneratedNever()` shape for a key over a computed column, next to the columnstore
   section, because it is the question `HasNoKey()` raises next and it is EF's own answer, not this package's.
 
@@ -485,9 +509,25 @@ truncation that does not happen.
   Loud rather than silent, and only on the `sqlcmd` path — `database update` and SSMS are unaffected.
   Refusing such a body outright was tried and rejected: it removes a capability that works on every
   other path, and re-splits the `GO` rule that this release just unified.
-- Stored procedures, partition functions and schemes, table placement and clustered columnstore indexes are
-  the first-class object kinds. Functions, views, triggers, table types and sequences have no contract, no
-  validator and no migration support.
+- Stored procedures, user-defined functions, partition functions and schemes, table placement, clustered
+  columnstore indexes and full-text catalogs and indexes are the first-class object kinds. Functions have
+  migration support only — no generated contract and no validator. Views, triggers, table types and
+  sequences have no contract, no validator and no migration support.
+- NEW: functions are created after EF's operations, so a column default, computed column or check constraint
+  that calls a function created in the same migration fails at `CREATE TABLE`; create the function in an
+  earlier migration. The mirror image: a `WITH SCHEMABINDING` function over a table that the same migration
+  drops or alters is dropped after EF's operations, too late — SQL Server refuses the table change while the
+  schema-bound function stands; drop or rewrite the function in an earlier migration.
+- NEW: functions are created in name order, not dependency order. Scalar and multi-statement functions
+  resolve what they call when they run, so the order does not matter for them; an inline table-valued function
+  is bound at creation, so one that reads another inline function sorting after it fails until that one
+  exists — rename one, or add them in two migrations.
+- NEW: a function whose kind changes is dropped and created again, so permissions granted on it are lost with
+  the drop and have to be granted again in the same migration.
+- NEW: the preamble reads `ANSI_NULLS` and `QUOTED_IDENTIFIER` and nothing else, and only at the start of the
+  script. Those are the two session options SQL Server records on a module; `SCHEMABINDING`, `EXECUTE AS` and
+  `RETURNS NULL ON NULL INPUT` are part of the module text and travel with it. The header detection is still the comment-blind regex both parsers have always used, so a comment
+  ahead of the header that itself reads `CREATE OR ALTER PROCEDURE x` would be taken for the header.
 - NEW, and stated as the limits of the partitioning support rather than as bugs, because each is a change SQL
   Server cannot make in place and a scaffolded migration cannot judge the cost of: a partition function's
   type or range direction, a scheme's function or filegroup, and an existing table's scheme or partitioning

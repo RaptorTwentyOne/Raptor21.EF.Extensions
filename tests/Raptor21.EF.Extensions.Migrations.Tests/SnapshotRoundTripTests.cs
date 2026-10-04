@@ -49,6 +49,9 @@ public class SnapshotRoundTripTests
         // Full-text: the catalog on the model, the index on the entity — property names, key index and tracking.
         Assert.Contains(".HasAnnotation(\"Raptor21:FullTextCatalog:ft_Account\", \"v1\")", snapshot, StringComparison.Ordinal);
         Assert.Contains(".HasAnnotation(\"Raptor21:FullTextIndex\", \"v1|ft_Account||AUTO|Name:1055,Email\")", snapshot, StringComparison.Ordinal);
+
+        // A function script, preamble included, as a model annotation under its own prefix.
+        Assert.Contains(".HasAnnotation(\"Fn:dbo.Fullness\", \"SET QUOTED_IDENTIFIER OFF", snapshot, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -102,8 +105,14 @@ public class SnapshotRoundTripTests
             customers.Property(c => c.Name).HasColumnType("nvarchar(200)");
             customers.Property(c => c.Email).HasColumnType("nvarchar(254)");
             customers.HasFullTextIndex("ft_Account", [new FullTextColumn("Name", 1055), new FullTextColumn("Email")]);
+
+            // What RegisterDatabaseScripts records for a function script.
+            modelBuilder.Model.SetAnnotation(FunctionScript.AnnotationPrefix + "dbo.Fullness", FunctionBody);
         }
     }
+
+    private const string FunctionBody =
+        "SET QUOTED_IDENTIFIER OFF\nCREATE OR ALTER FUNCTION dbo.Fullness() RETURNS varchar(10) AS\nBEGIN RETURN \"full\" END\n";
 
     // What the generated snapshot says, written the way the snapshot writes it: no extension method from this
     // package in sight, only HasAnnotation with the serialized values.
@@ -115,7 +124,8 @@ public class SnapshotRoundTripTests
                 .HasDefaultSchema("dbo")
                 .HasAnnotation("Raptor21:PartitionFunction:pf_EventsMonth", "v1|datetime2(3)|RIGHT|'20260801','20260901'")
                 .HasAnnotation("Raptor21:PartitionScheme:ps_Events", "v1|pf_EventsMonth|PRIMARY")
-                .HasAnnotation("Raptor21:FullTextCatalog:ft_Account", "v1");
+                .HasAnnotation("Raptor21:FullTextCatalog:ft_Account", "v1")
+                .HasAnnotation("Fn:dbo.Fullness", FunctionBody);
 
             modelBuilder.Entity<Event>(b =>
             {

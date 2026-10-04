@@ -11,7 +11,7 @@ the gap this family closes.
 | Package | What it does |
 |---|---|
 | **`Raptor21.EF.Extensions.StoredProcedures`** | The runtime — contracts, a contract-driven executor and a live-schema validator — plus the Roslyn source generator, which ships inside this package. |
-| **`Raptor21.EF.Extensions.Migrations`** | Registers those scripts on the EF model and diffs them, so `dotnet ef migrations add` emits `CREATE OR ALTER` / `DROP` alongside the table DDL. Carries partition functions and schemes, a table's placement on a scheme and clustered columnstore indexes the same way. EF Core 10, SQL Server. |
+| **`Raptor21.EF.Extensions.Migrations`** | Registers those scripts on the EF model and diffs them, so `dotnet ef migrations add` emits `CREATE OR ALTER` / `DROP` alongside the table DDL. Carries user-defined functions, partition functions and schemes, a table's placement on a scheme and clustered columnstore indexes the same way. EF Core 10, SQL Server. |
 
 The runtime and the generator are separate projects on purpose: schema knowledge is resolved at compile
 time and never by reflection, which is what keeps trimming and AOT working. They are *not* separate
@@ -231,6 +231,57 @@ past. The wrap is unconditional, because plain `migrations script` is no safer �
 `BEGIN TRANSACTION` and separates commands with a newline rather than a batch terminator. The visible
 cost is that the scaffolded migration and the generated script read `EXEC(N'...')` around the procedure
 instead of the bare body. `DROP PROCEDURE IF EXISTS` is bound by no such rule and is left unwrapped.
+
+### User-defined functions
+
+Scalar, inline table-valued and multi-statement table-valued functions travel the same way. Keep them
+next to the procedures and register the folder with `RegisterDatabaseScripts`, which classifies every
+script by its header:
+
+```csharp
+// dbo.GET_CHARACTER_LIST.sql -> CREATE OR ALTER PROCEDURE ...  -> annotation "Sp:dbo.GET_CHARACTER_LIST"
+// dbo.GetAccountID.sql       -> CREATE OR ALTER FUNCTION ...   -> annotation "Fn:dbo.GetAccountID"
+modelBuilder.RegisterDatabaseScripts(typeof(GameDbContext).Assembly, "MyApp.DbScripts");
+```
+
+A script that is neither a `CREATE OR ALTER PROCEDURE` nor a `CREATE OR ALTER FUNCTION` batch is refused, and
+so is a procedure and a function of the same name — SQL Server keeps both in one namespace.
+`RegisterStoredProcedures` is unchanged and still accepts procedures only. The same differ diffs both kinds:
+a function is created or altered with `EXEC(N'CREATE OR ALTER FUNCTION ...')` after every table and index
+and before the procedures, which may call it, and dropped with `DROP FUNCTION IF EXISTS` after the procedures.
+`CREATE OR ALTER` cannot turn a scalar function into a table-valued one or back, so a change of kind — read
+from the `RETURNS` clause — is a `DROP FUNCTION IF EXISTS` followed by the create, in one statement.
+Functions have migration support only: there is no generated contract and no startup validator for them.
+
+### `SET ANSI_NULLS` / `SET QUOTED_IDENTIFIER` ahead of the header
+
+SQL Server records both options on a procedure or function when it is created
+(`sys.sql_modules.uses_ansi_nulls`, `uses_quoted_identifier`) and applies the recorded values every time
+it runs, whatever the caller's session says. A module created through an ordinary client has both `ON`;
+a legacy one created with either `OFF` behaves differently — under `ANSI_NULLS OFF`, `WHERE col = @p`
+matches the NULL rows when `@p` is NULL, and under `QUOTED_IDENTIFIER OFF`, `"abc"` is a string. To keep
+such a module as it is, state the options at the very top of its script:
+
+```sql
+SET ANSI_NULLS OFF
+SET QUOTED_IDENTIFIER OFF
+CREATE OR ALTER PROCEDURE [dbo].[LOAD_KNIGHTS_MEMBERS] ...
+```
+
+Only these two options are read, only at the start of the script, each optionally ended by `;`; everything
+after the line break that ends the last one is the module, byte for byte. Such a script is wrapped twice:
+
+```sql
+EXEC(N'SET ANSI_NULLS OFF; SET QUOTED_IDENTIFIER OFF; EXEC(N''CREATE OR ALTER PROCEDURE ...'')');
+```
+
+The nesting is not decoration. `QUOTED_IDENTIFIER` is applied when a batch is *parsed*, so a `SET` written
+in front of `EXEC(N'CREATE ...')` in the same batch is overridden by any `SET ... ON` that follows it there,
+and moving the restore into a command of its own would leak `OFF` into everything EF runs in between. Inside
+the outer dynamic batch the options are in force when the inner one is parsed and created, and SQL Server
+restores the caller's options when the dynamic batch ends — inside the migration's transaction and inside
+the `IF NOT EXISTS ... BEGIN ... END` of an idempotent script alike. A script without the two statements is
+wrapped exactly as before, byte for byte.
 
 ---
 

@@ -10,6 +10,8 @@ namespace Raptor21.EF.Extensions.Migrations;
 /// <summary>
 /// Extends EF Core's migration model differ with the code-first database objects this package declares:
 /// stored procedures registered by <see cref="StoredProcedureModelExtensions.RegisterStoredProcedures"/>,
+/// stored procedures and user-defined functions registered by
+/// <see cref="DatabaseScriptModelExtensions.RegisterDatabaseScripts"/>,
 /// partition functions and schemes, a table's placement on a scheme, clustered columnstore indexes, and
 /// full-text catalogs and indexes. Each is diffed against the model snapshot next to EF's own table diff and
 /// lands in the same migration, in an order the database accepts. EF invokes the differ once per direction,
@@ -31,8 +33,9 @@ namespace Raptor21.EF.Extensions.Migrations;
 /// columnstore index immediately behind its <c>CREATE TABLE</c> so that every nonclustered index EF creates
 /// afterwards is built over it, and an existing table's new columnstore inserted before the first index this
 /// migration adds to that table — remaining columnstore creates and renames on tables that already exist,
-/// full-text index creates (after every index, because the key index must exist), procedures, full-text
-/// catalog drops, scheme drops, function drops. Every full-text statement is marked transaction-suppressed,
+/// full-text index creates (after every index, because the key index must exist), user-defined function
+/// creates, alters and kind-change re-creates, procedures, user-defined function drops, full-text catalog
+/// drops, partition scheme drops, partition function drops. Every full-text statement is marked transaction-suppressed,
 /// because SQL Server refuses full-text DDL inside a user transaction (error 574); EF commits the migration's
 /// transaction before such a statement and opens a new one after it.
 /// </para>
@@ -192,9 +195,28 @@ public class CodeFirstDatabaseObjectsModelDiffer : MigrationsModelDiffer
         foreach (var definition in rebuilt)
             operations.Add(Sql(FullTextDiff.CreateIndex(definition).Sql, suppressTransaction: true));
 
+        // Function creates and alters come after every table and index (an inline table-valued function is
+        // bound to the tables it reads when it is created) and before the procedures, which may call them. A
+        // kind change is one Recreate statement, drop and create together, and belongs here too.
+        foreach (var op in plan.Functions)
+        {
+            if (op.Kind != FunctionOpKind.Drop)
+                operations.Add(Sql(op.Sql));
+        }
+
         // Procedure operations run after table operations (a procedure may reference tables).
         foreach (var op in plan.Procedures)
             operations.Add(Sql(op.Sql));
+
+        // Function drops come after the procedures, the mirror of the creates: a procedure the same migration
+        // drops or rewrites stops referring to the function before the function goes. Procedures are not
+        // schema-bound, so SQL Server would not refuse the other order - this one simply never leaves a
+        // deployed procedure calling a function that no longer exists, even between two statements.
+        foreach (var op in plan.Functions)
+        {
+            if (op.Kind == FunctionOpKind.Drop)
+                operations.Add(Sql(op.Sql));
+        }
 
         // A catalog is dropped after every index that lived in it, which the drops above have already done.
         foreach (var op in plan.FullText)
@@ -334,11 +356,15 @@ public class CodeFirstDatabaseObjectsModelDiffer : MigrationsModelDiffer
             SurvivingFullText(sourceTables, targetTables, tableMap),
             targetTables.FullText.Values);
 
+        var functions = FunctionDiff.Compute(
+            DatabaseScriptModelExtensions.GetFunctionScripts(source?.Model),
+            DatabaseScriptModelExtensions.GetFunctionScripts(target?.Model));
+
         var procedures = StoredProcedureDiff.Compute(
             StoredProcedureModelExtensions.GetStoredProcedureScripts(source?.Model),
             StoredProcedureModelExtensions.GetStoredProcedureScripts(target?.Model));
 
-        return new Plan(partition, columnstore, fullText, procedures, targetTables.Placements, targetTables.FullText);
+        return new Plan(partition, columnstore, fullText, functions, procedures, targetTables.Placements, targetTables.FullText);
     }
 
     private void RequireGeneratorFor(CodeFirstTableLayout targetTables)
@@ -520,10 +546,11 @@ internal sealed record Plan(
     IReadOnlyList<PartitionOp> Partition,
     IReadOnlyList<ColumnstoreOp> Columnstore,
     IReadOnlyList<FullTextOp> FullText,
+    IReadOnlyList<FunctionOp> Functions,
     IReadOnlyList<ProcOp> Procedures,
     IReadOnlyDictionary<TableKey, TablePlacement> Placements,
     IReadOnlyDictionary<TableKey, FullTextIndexDefinition> FullTextTargets)
 {
     /// <summary>The number of operations this package will add to the migration. Placements add annotations, not operations.</summary>
-    public int Count => Partition.Count + Columnstore.Count + FullText.Count + Procedures.Count;
+    public int Count => Partition.Count + Columnstore.Count + FullText.Count + Functions.Count + Procedures.Count;
 }
