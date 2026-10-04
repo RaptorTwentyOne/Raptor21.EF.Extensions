@@ -28,7 +28,7 @@ public static partial class FunctionScript
     /// <summary>Model-annotation key prefix under which function scripts are stored (e.g. "Fn:dbo.GetAccountID").</summary>
     public const string AnnotationPrefix = "Fn:";
 
-    [GeneratedRegex(@"\bCREATE\s+OR\s+ALTER\s+FUNCTION\s+(\[?[A-Za-z0-9_]+\]?)(?:\s*\.\s*(\[?[A-Za-z0-9_]+\]?))?",
+    [GeneratedRegex(@"\bCREATE\s+OR\s+ALTER\s+FUNCTION\s+(" + SqlIdentifier.Part + @")(?:\s*\.\s*(" + SqlIdentifier.Part + "))?",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex CreateOrAlterRegex();
 
@@ -83,15 +83,12 @@ public static partial class FunctionScript
             throw new InvalidOperationException(
                 $"Function script '{scriptName}' must start with 'CREATE OR ALTER FUNCTION' (idempotency requires CREATE OR ALTER, not plain CREATE).");
 
-        var first = Unbracket(match.Groups[1].Value);
-        var second = match.Groups[2].Success ? Unbracket(match.Groups[2].Value) : null;
-
-        var schema = second is null ? "dbo" : first;
-        var name = second ?? first;
-        return ($"{schema}.{name}", match.Index + match.Length);
+        var qualifiedName = SqlIdentifier.Canonical(
+            match.Groups[1].Value,
+            match.Groups[2].Success ? match.Groups[2].Value : null,
+            scriptName);
+        return (qualifiedName, match.Index + match.Length);
     }
-
-    private static string Unbracket(string ident) => ident.Trim().Trim('[', ']');
 
     // The first occurrence of a keyword at statement level, from `start`: comments, string literals,
     // bracketed identifiers and "..." are stepped over, so a parameter list annotated with

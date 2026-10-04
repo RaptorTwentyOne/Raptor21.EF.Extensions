@@ -25,7 +25,7 @@ surface is not a compatibility commitment.
   nuget.org trusted publishing (OIDC).
 
 
-- 738 tests across the three suites — 285 over the runtime library, 274 over the migration package, 179
+- 762 tests across the three suites — 285 over the runtime library, 298 over the migration package, 179
   over the generator — and not one needs a SQL Server, a network or the file system. Ten pure statics
   sit behind the runtime library's `InternalsVisibleTo` to make that possible: eight widened from
   `private`, and two lifted out of loops that had been written inline. No existing public signature was
@@ -413,6 +413,17 @@ surface is not a compatibility commitment.
 
 ### Fixed
 
+- **A procedure or function name is read the way SQL Server reads it.** The header was matched with
+  `\[?[A-Za-z0-9_]+\]?`, which stopped at the first character outside ASCII: a procedure named
+  `MOB_NPC_İNSERT` (U+0130), from a real database, was registered as `dbo.MOB_NPC_`, so its annotation key
+  named an object that does not exist and the `DROP PROCEDURE IF EXISTS` of the migration's `Down` dropped
+  nothing while the real procedure stayed. A name part is now a regular identifier by the T-SQL rules — a
+  Unicode letter, `_`, `@` or `#`, then Unicode letters, decimal digits, combining marks, `_`, `@`, `#` and
+  `$` — or a delimited `[...]` with `]]` for `]`, or a quoted `"..."` with `""` for `"`; the canonical
+  `schema.name` holds the unescaped parts, and `Bracket` — which every `DROP` goes through — doubles a `]`
+  again instead of emitting `[odd]name]`. A dot inside a name round-trips, because the key is split on its
+  first dot and the schema is always present; a dot inside a schema cannot, and is refused at registration
+  naming the script rather than dropped as `[a].[b.c]`.
 - The shipped analyzer loads on every .NET 10 SDK again. Its `Microsoft.CodeAnalysis.CSharp` reference
   had moved to the newest release with the rest of the tree, and that line is not a dependency version —
   it is the oldest compiler that can load the generator. A compiler older than the Roslyn it was built
@@ -522,6 +533,10 @@ truncation that does not happen.
   resolve what they call when they run, so the order does not matter for them; an inline table-valued function
   is bound at creation, so one that reads another inline function sorting after it fails until that one
   exists — rename one, or add them in two migrations.
+- NEW: a schema whose name contains a `.` is refused for procedures and functions. The canonical key is
+  `schema.name` split on its first dot, which keeps a dot inside the NAME intact but cannot tell `[a.b].[c]`
+  from `[a].[b.c]`; carrying such a schema would mean changing the key format every snapshot already holds.
+  The source generator's own header reader is separate and was not part of this fix.
 - NEW: a function whose kind changes is dropped and created again, so permissions granted on it are lost with
   the drop and have to be granted again in the same migration.
 - NEW: the preamble reads `ANSI_NULLS` and `QUOTED_IDENTIFIER` and nothing else, and only at the start of the

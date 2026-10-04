@@ -9,7 +9,9 @@ public static partial class StoredProcedureScript
     /// <summary>Model-annotation key prefix under which procedure scripts are stored (e.g. "Sp:dbo.ACCOUNT_LOGIN").</summary>
     public const string AnnotationPrefix = "Sp:";
 
-    [GeneratedRegex(@"\bCREATE\s+OR\s+ALTER\s+PROC(?:EDURE)?\s+(\[?[A-Za-z0-9_]+\]?)(?:\s*\.\s*(\[?[A-Za-z0-9_]+\]?))?",
+    // The name parts follow SqlIdentifier.Part - SQL Server's identifier rules, not ASCII - so a Unicode name
+    // such as MOB_NPC_İNSERT is read whole instead of being cut at its first non-ASCII letter.
+    [GeneratedRegex(@"\bCREATE\s+OR\s+ALTER\s+PROC(?:EDURE)?\s+(" + SqlIdentifier.Part + @")(?:\s*\.\s*(" + SqlIdentifier.Part + "))?",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex CreateOrAlterRegex();
 
@@ -35,24 +37,17 @@ public static partial class StoredProcedureScript
             throw new InvalidOperationException(
                 $"Stored procedure script '{scriptName}' must start with 'CREATE OR ALTER PROCEDURE' (idempotency requires CREATE OR ALTER, not plain CREATE).");
 
-        var first = Unbracket(match.Groups[1].Value);
-        var second = match.Groups[2].Success ? Unbracket(match.Groups[2].Value) : null;
-
-        var schema = second is null ? "dbo" : first;
-        var name = second ?? first;
-        return $"{schema}.{name}";
+        return SqlIdentifier.Canonical(
+            match.Groups[1].Value,
+            match.Groups[2].Success ? match.Groups[2].Value : null,
+            scriptName);
     }
 
-    /// <summary>Wraps a canonical <c>schema.name</c> as <c>[schema].[name]</c> for use in T-SQL.</summary>
-    public static string Bracket(string qualifiedName)
-    {
-        var dot = qualifiedName.IndexOf('.');
-        return dot < 0
-            ? $"[{qualifiedName}]"
-            : $"[{qualifiedName[..dot]}].[{qualifiedName[(dot + 1)..]}]";
-    }
-
-    private static string Unbracket(string ident) => ident.Trim().Trim('[', ']');
+    /// <summary>
+    /// Wraps a canonical <c>schema.name</c> as <c>[schema].[name]</c> for use in T-SQL, splitting on the first
+    /// dot and doubling any <c>]</c> inside a part.
+    /// </summary>
+    public static string Bracket(string qualifiedName) => SqlIdentifier.Bracket(qualifiedName);
 
     /// <summary>
     /// Wraps one procedure or function script as <c>EXEC(N'...')</c> so it survives being nested inside

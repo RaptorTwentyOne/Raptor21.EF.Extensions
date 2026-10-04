@@ -45,6 +45,20 @@ public class RegisterDatabaseScriptsTests
     }
 
     [Fact]
+    public void UnicodeNames_AreRegisteredUnderTheirWholeName()
+    {
+        // The KnightOnline case: the key used to be cut at U+0130 to "dbo.MOB_NPC_", for both kinds.
+        var assembly = new FakeResourceAssembly()
+            .With("Fx.DbScripts.dbo.MOB_NPC_İNSERT.sql", Procedure("[dbo].[MOB_NPC_İNSERT]"))
+            .With("Fx.DbScripts.dbo.MOB_NPC_İNSERT_COUNT.sql", Function("dbo.MOB_NPC_İNSERT_COUNT"));
+
+        var model = Register(assembly);
+
+        Assert.Equal("dbo.MOB_NPC_İNSERT", Assert.Single(StoredProcedureModelExtensions.GetStoredProcedureScripts(model)).Key);
+        Assert.Equal("dbo.MOB_NPC_İNSERT_COUNT", Assert.Single(DatabaseScriptModelExtensions.GetFunctionScripts(model)).Key);
+    }
+
+    [Fact]
     public void AProcedureAndAFunctionOfOneName_CollideNamingBothFiles()
     {
         var assembly = new FakeResourceAssembly()

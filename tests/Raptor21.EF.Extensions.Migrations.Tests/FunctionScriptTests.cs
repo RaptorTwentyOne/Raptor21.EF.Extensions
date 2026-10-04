@@ -15,6 +15,42 @@ public class FunctionScriptTests
         Assert.Equal(expected, FunctionScript.ParseQualifiedName(sql, "test.sql"));
     }
 
+    // The same identifier rules as procedures: Unicode regular identifiers read whole, delimited ones unescaped.
+    [Theory]
+    [InlineData("CREATE OR ALTER FUNCTION [dbo].[MOB_NPC_İNSERT]() RETURNS int AS BEGIN RETURN 1 END", "dbo.MOB_NPC_İNSERT")]
+    [InlineData("CREATE OR ALTER FUNCTION dbo.MOB_NPC_İNSERT() RETURNS int AS BEGIN RETURN 1 END", "dbo.MOB_NPC_İNSERT")]
+    [InlineData("CREATE OR ALTER FUNCTION MOB_NPC_İNSERT(@a int) RETURNS TABLE AS RETURN SELECT @a AS a", "dbo.MOB_NPC_İNSERT")]
+    [InlineData("CREATE OR ALTER FUNCTION [dbo].[f name]]x]() RETURNS int AS BEGIN RETURN 1 END", "dbo.f name]x")]
+    public void ParseQualifiedName_FollowsTheIdentifierRules(string sql, string expected)
+    {
+        Assert.Equal(expected, FunctionScript.ParseQualifiedName(sql, "f.sql"));
+    }
+
+    [Fact]
+    public void AUnicodeName_StillReadsItsKindAfterTheName()
+    {
+        // The kind is read from the RETURNS clause AFTER the header, so a header cut short at a non-ASCII letter
+        // would also start that search inside the name.
+        Assert.Equal(
+            FunctionKind.InlineTableValued,
+            FunctionScript.DetectKind("CREATE OR ALTER FUNCTION dbo.İŞLEV_RETURNS(@a int) RETURNS TABLE AS RETURN SELECT @a AS a", "f.sql"));
+    }
+
+    [Fact]
+    public void DropOfAUnicodeOrDelimitedName_NamesTheRealObject()
+    {
+        var ops = FunctionDiff.Compute(
+            new Dictionary<string, string>
+            {
+                ["dbo.MOB_NPC_İNSERT"] = "CREATE OR ALTER FUNCTION dbo.MOB_NPC_İNSERT() RETURNS int AS BEGIN RETURN 1 END",
+                ["dbo.f name]x"] = "CREATE OR ALTER FUNCTION [dbo].[f name]]x]() RETURNS int AS BEGIN RETURN 1 END",
+            },
+            new Dictionary<string, string>());
+
+        Assert.Contains(ops, o => o.Sql == "DROP FUNCTION IF EXISTS [dbo].[MOB_NPC_İNSERT];");
+        Assert.Contains(ops, o => o.Sql == "DROP FUNCTION IF EXISTS [dbo].[f name]]x];");
+    }
+
     [Fact]
     public void ParseQualifiedName_PlainCreate_Throws()
     {
